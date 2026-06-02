@@ -15,6 +15,7 @@ import logging
 import os
 import re
 import sys
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -29,6 +30,22 @@ from code_sentinel.reporter.formatter import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class StepResult:
+    """Track status of a pipeline step."""
+
+    name: str           # "Dependency Scan", "OSV Audit", etc.
+    status: str         # "ok", "partial", "skipped", "failed"
+    message: str        # Human-readable summary
+    details: dict = field(default_factory=dict)
+
+    @property
+    def emoji(self) -> str:
+        return {"ok": "✅", "partial": "⚠️", "skipped": "⏭️", "failed": "❌"}.get(
+            self.status, "❓"
+        )
 
 
 # ── Config ───────────────────────────────────────────────────────
@@ -59,10 +76,13 @@ def _load_config() -> dict[str, str]:
         except Exception:
             pass
 
-    # Override with env vars
+    # Override with env vars (try prefixed first, then non-prefixed)
     for key in _DEFAULT_CONFIG:
-        env_key = _ENV_PREFIX + key.upper()
-        val = os.environ.get(env_key)
+        prefixed_key = _ENV_PREFIX + key.upper()
+        val = os.environ.get(prefixed_key)
+        if val is None:
+            # Fallback: try non-prefixed (e.g. GITHUB_TOKEN, MIMO_API_KEY)
+            val = os.environ.get(key.upper())
         if val is not None:
             config[key] = val
 
@@ -193,6 +213,9 @@ async def _run_pipeline(
         github_token=config_dict.get("github_token"),
     )
 
+    # Pipeline step tracking
+    steps: list[StepResult] = []
+
     # Parse PR URL
     try:
         owner, repo, pr_number = parse_pr_url(args.pr_url)
@@ -209,8 +232,10 @@ async def _run_pipeline(
     changed_files = pr_data.get("changed_files", [])
 
     if not raw_diff and not changed_files:
+        steps.append(StepResult("PR Data", "failed", "Could not fetch PR diff"))
         print("Error: Could not fetch PR diff. Check your GITHUB_TOKEN.", file=sys.stderr)
         return 1
+    steps.append(StepResult("PR Data", "ok", "PR data collected"))
 
     # ── Step 2: Parse diff -> ChangeSet ──────────────────────────
     print("  [2/6] Parsing diff...", file=sys.stderr)
@@ -283,19 +308,62 @@ async def _run_pipeline(
                                 logger.warning("Layer 3 dep scan failed for %s: %s", dep_file, exc)
 
             print(f"         Found {len(dep_changes)} dependency change(s)", file=sys.stderr)
+            # Determine if Layer 3 (full file content) was used
+            used_layer3 = bool(low_conf_files and base_sha and head_sha)
+            dep_status = "ok" if used_layer3 else "partial"
+            dep_msg = f"{len(dep_changes)} deps found, {'full scan' if used_layer3 else 'patch-only'}"
+            steps.append(StepResult("Dependency Scan", dep_status, dep_msg))
         else:
             print("         No dependency files in changeset", file=sys.stderr)
+            steps.append(StepResult("Dependency Scan", "skipped", "No dependency files in changeset"))
+    else:
+        steps.append(StepResult("Dependency Scan", "skipped", "No changeset available"))
 
     # ── Step 4: Project context (project_profile.md + review_policy.md) ──
+    # SECURITY: Always load from BASE branch to prevent a malicious PR from
+    # injecting instructions via .codesentinel/ config files.
+    _SENSITIVE_WORDS = re.compile(
+        r"\b(?:key|token|secret|password|credential)\b|"
+        r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|"
+        r"private[_-]?key|client[_-]?secret)",
+        re.IGNORECASE,
+    )
+
+    # Check if PR modifies .codesentinel/
+    codesentinel_modified = any(
+        f.path.startswith(".codesentinel/") for f in (changeset.files if changeset else [])
+    )
+    if codesentinel_modified:
+        steps.append(StepResult(
+            "Project Context", "partial",
+            "审查策略被本次PR修改，使用base branch配置",
+        ))
+
+    # Load from base branch via GitHub API
     project_context = ""
-    if args.repo_path:
+    _ctx_count = 0
+    base_sha = pr_data.get("pr", {}).get("base_sha", "")
+    if base_sha and owner and repo:
+        from code_sentinel.git_provider.github import GitHubProvider
+        async with GitHubProvider(config_obj) as gh_ctx:
+            for ctx_file in ("project_profile.md", "review_policy.md"):
+                try:
+                    raw = await gh_ctx.get_file_content(
+                        owner, repo, f".codesentinel/{ctx_file}", ref=base_sha
+                    )
+                    if raw:
+                        sanitized = "\n".join(
+                            line for line in raw.splitlines()
+                            if not _SENSITIVE_WORDS.search(line)
+                        )
+                        project_context += f"\n\n## {ctx_file}\n\n{sanitized}"
+                        _ctx_count += 1
+                except Exception:
+                    pass
+
+    # Fallback: try local file if API failed or base_sha unavailable
+    if not project_context and args.repo_path:
         repo_root = Path(args.repo_path).resolve()
-        _SENSITIVE_WORDS = re.compile(
-            r"\b(?:key|token|secret|password|credential)\b|"
-            r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|"
-            r"private[_-]?key|client[_-]?secret)",
-            re.IGNORECASE,
-        )
         for ctx_file in ("project_profile.md", "review_policy.md"):
             ctx_path = repo_root / ".codesentinel" / ctx_file
             if ctx_path.exists():
@@ -306,10 +374,26 @@ async def _run_pipeline(
                         if not _SENSITIVE_WORDS.search(line)
                     )
                     project_context += f"\n\n## {ctx_file}\n\n{sanitized}"
+                    _ctx_count += 1
                 except Exception as exc:
                     logger.warning("Failed to read %s: %s", ctx_path, exc)
-        if project_context:
-            print(f"         Loaded project context from .codesentinel/", file=sys.stderr)
+
+    if project_context:
+        print(f"         Loaded project context from .codesentinel/", file=sys.stderr)
+
+    # Only add step if we didn't already add one for codesentinel_modified
+    if not codesentinel_modified:
+        if _ctx_count > 0:
+            _file_names = []
+            if "project_profile.md" in project_context:
+                _file_names.append("project_profile.md")
+            if "review_policy.md" in project_context:
+                _file_names.append("review_policy.md")
+            status = "ok" if len(_file_names) == 2 else "partial"
+            steps.append(StepResult("Project Context", status,
+                                    f"Loaded {' + '.join(_file_names)}"))
+        else:
+            steps.append(StepResult("Project Context", "skipped", "No .codesentinel/ directory"))
 
     # ── Step 5: Parse CODEOWNERS ─────────────────────────────────
     codeowners = None
@@ -344,19 +428,26 @@ async def _run_pipeline(
     # ── Step 7: Risk scoring ─────────────────────────────────────
     print("  [4/6] Computing risk score...", file=sys.stderr)
     rules_path = args.rules or config_dict.get("rules_file") or None
+    # Load rules once — used for risk scoring AND critical_paths for file ranker
+    from code_sentinel.risk.rules import load_rules
+    loaded_ruleset = load_rules(rules_path)
     risk_score = assess_risk(
         changeset=changeset,
         dep_changes=dep_changes,
         codeowners=codeowners,
         author=pr_data.get("pr", {}).get("author", ""),
         module_defect_density=module_densities if module_densities else None,
-        rules_path=rules_path,
+        ruleset=loaded_ruleset,
     )
 
     print(
         f"         Risk: {risk_score.level.value.upper()} (score={risk_score.score})",
         file=sys.stderr,
     )
+    steps.append(StepResult(
+        "Risk Scoring", "ok",
+        f"Risk: {risk_score.level.value.upper()} (score={risk_score.score})"
+    ))
 
     # ── Level 2 & 3: Conditional audits ──────────────────────────
     supply_chain_report = None
@@ -392,7 +483,19 @@ async def _run_pipeline(
             changed_files=changed_files,
             packages=supply_chain_packages or None,
         )
+        # Track supply chain audit result
+        _vuln_count = len(getattr(supply_chain_report, 'vulnerable_deps', []))
+        _query_failed = getattr(supply_chain_report, 'query_failed_count', 0)
+        if _query_failed > 0:
+            steps.append(StepResult("OSV Audit", "partial",
+                                    f"OSV query failed for {_query_failed} packages"))
+        else:
+            steps.append(StepResult("OSV Audit", "ok",
+                                    f"{_vuln_count} vulnerabilities found"))
+
         impact_report = assess_impact(changed_files)
+        steps.append(StepResult("Impact Assessment", "ok",
+                                f"Build impact: +{getattr(impact_report, 'estimated_build_seconds', 0)}s"))
 
         if risk_score.level == RiskLevel.HIGH:
             # Level 3: Deep LLM review
@@ -420,16 +523,30 @@ async def _run_pipeline(
                                 if f.test_suggestion
                             ],
                         )
+                        steps.append(StepResult("LLM Deep Review", "ok",
+                                                f"{len(findings)} findings"))
+                    else:
+                        steps.append(StepResult("LLM Deep Review", "ok", "0 findings"))
                 except Exception as exc:
                     logger.error("Deep review failed: %s", exc)
                     print(f"  [6/6] Deep review failed: {exc}", file=sys.stderr)
+                    if "timeout" in str(exc).lower():
+                        steps.append(StepResult("LLM Deep Review", "failed", "LLM timeout"))
+                    else:
+                        steps.append(StepResult("LLM Deep Review", "failed",
+                                                f"LLM error: {exc}"))
             else:
                 print("  [6/6] Skipping deep review (--skip-llm)", file=sys.stderr)
+                steps.append(StepResult("LLM Deep Review", "skipped", "--skip-llm"))
         else:
             print("  [6/6] Skipping deep review (medium risk)", file=sys.stderr)
+            steps.append(StepResult("LLM Deep Review", "skipped", "risk=medium, not triggered"))
     else:
         print("  [5/6] Skipping audits (low risk)", file=sys.stderr)
         print("  [6/6] Skipping deep review (low risk)", file=sys.stderr)
+        steps.append(StepResult("OSV Audit", "skipped", "risk=low, not triggered"))
+        steps.append(StepResult("Impact Assessment", "skipped", "risk=low, not triggered"))
+        steps.append(StepResult("LLM Deep Review", "skipped", "risk=low, not triggered"))
 
     # ── Record in memory ─────────────────────────────────────────
     if memory:
@@ -452,7 +569,7 @@ async def _run_pipeline(
         )
         risk_ctx = {
             "high_defect_modules": _high_defect,
-            "critical_paths": [],
+            "critical_paths": loaded_ruleset.critical_paths,
         }
         needs_attention = get_top_files(changeset, n=10, risk_context=risk_ctx)
 
@@ -471,6 +588,8 @@ async def _run_pipeline(
         impact_report=impact_report,
         deep_review=deep_review_findings,
         needs_attention=needs_attention,
+        pipeline_steps=steps,
+        codesentinel_modified=codesentinel_modified,
     )
 
     # ── Render output ────────────────────────────────────────────

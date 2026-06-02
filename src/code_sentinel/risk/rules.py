@@ -29,6 +29,7 @@ class RuleSet:
     rules: List[Rule] = field(default_factory=list)
     low_risk_max: int = 3
     medium_risk_max: int = 6
+    critical_paths: List[Dict[str, Any]] = field(default_factory=list)
 
 
 # ---- Built-in functions available in rule expressions ----
@@ -237,6 +238,14 @@ def load_rules_from_toml(toml_data: dict) -> RuleSet:
             enabled=r.get("enabled", True),
         )
         ruleset.rules.append(rule)
+
+    # Load project critical paths
+    project = toml_data.get("project", {})
+    critical_paths = project.get("critical_paths", [])
+    if isinstance(critical_paths, list):
+        ruleset.critical_paths = [
+            cp for cp in critical_paths if isinstance(cp, dict) and "path" in cp
+        ]
 
     return ruleset
 

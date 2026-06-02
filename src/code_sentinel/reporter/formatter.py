@@ -72,6 +72,9 @@ class ReportContext:
     # File ranking (needs human attention)
     needs_attention: list[dict[str, Any]] = field(default_factory=list)
 
+    # Pipeline status
+    pipeline_steps: list[Any] = field(default_factory=list)
+
     # Recommendations
     recommendations: list[str] = field(default_factory=list)
 
@@ -79,6 +82,9 @@ class ReportContext:
     generated_at: str = field(
         default_factory=lambda: datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
     )
+
+    # Security: .codesentinel/ config was modified by this PR
+    codesentinel_modified: bool = False
 
 
 _RISK_EMOJI = {"low": "🟢", "medium": "🟡", "high": "🔴"}
@@ -108,6 +114,8 @@ def build_report_context(
     impact_report: Any = None,
     deep_review: ReviewResults | None = None,
     needs_attention: list | None = None,
+    pipeline_steps: list | None = None,
+    codesentinel_modified: bool = False,
 ) -> ReportContext:
     """Build a ReportContext from individual audit results."""
     ctx = ReportContext(
@@ -116,6 +124,7 @@ def build_report_context(
         risk_level=risk_level,
         risk_details=risk_details or {},
         risk_breakdown=risk_breakdown or [],
+        codesentinel_modified=codesentinel_modified,
     )
 
     # Map supply chain report
@@ -181,6 +190,10 @@ def build_report_context(
             if hasattr(rf, "path") else rf
             for rf in needs_attention
         ]
+
+    # Pipeline steps
+    if pipeline_steps:
+        ctx.pipeline_steps = list(pipeline_steps)
 
     # Generate recommendations
     ctx.recommendations = _generate_recommendations(ctx)
@@ -272,6 +285,8 @@ def render_markdown(ctx: ReportContext, template_dir: Path | None = None) -> str
         needs_attention=ctx.needs_attention,
         recommendations=ctx.recommendations,
         generated_at=ctx.generated_at,
+        pipeline_steps=ctx.pipeline_steps,
+        codesentinel_modified=ctx.codesentinel_modified,
     )
 
 
@@ -281,7 +296,7 @@ def render_pr_comment(ctx: ReportContext, template_dir: Path | None = None) -> s
 
     # Wrap in PR comment style with collapsible details
     header = f"## {_RISK_EMOJI.get(ctx.risk_level, '⚪')} CodeSentinel Review\n\n"
-    risk_badge = f"**Risk Score: {ctx.risk_score}/100** — {_RISK_LABEL.get(ctx.risk_level, 'Unknown')}\n\n"
+    risk_badge = f"**Risk Level:** {_RISK_EMOJI.get(ctx.risk_level, '⚪')} {_RISK_LABEL.get(ctx.risk_level, 'Unknown')} ({ctx.risk_score} points)\n\n"
 
     body = header + risk_badge + markdown
 
@@ -325,7 +340,12 @@ def render_json(ctx: ReportContext) -> str:
         },
         "recommendations": ctx.recommendations,
         "needs_attention": ctx.needs_attention,
+        "pipeline_steps": [
+            {"name": s.name, "status": s.status, "message": s.message}
+            for s in ctx.pipeline_steps
+        ],
         "generated_at": ctx.generated_at,
+        "codesentinel_modified": ctx.codesentinel_modified,
     }
     if ctx.deep_review:
         data["deep_review"] = asdict(ctx.deep_review)
@@ -343,13 +363,28 @@ def _render_inline(ctx: ReportContext) -> str:
 
     # Summary
     lines.append("## Summary")
-    lines.append(f"- **Risk Level:** {emoji} {label} ({ctx.risk_score}/100)")
+    lines.append(f"- **Risk Level:** {emoji} {label}")
+    lines.append(f"- **Risk Points:** {ctx.risk_score}")
     if ctx.pr.title:
         lines.append(f"- **PR:** [{ctx.pr.title}]({ctx.pr.url})")
     if ctx.pr.author:
         lines.append(f"- **Author:** {ctx.pr.author}")
     lines.append(f"- **Generated:** {ctx.generated_at}")
     lines.append("")
+
+    # Security warning
+    if ctx.codesentinel_modified:
+        lines.append("> ⚠️ **审查策略被本次PR修改** — 本次审查使用 base branch 配置，新策略将在合并后生效。")
+        lines.append("")
+
+    # Pipeline Status
+    if ctx.pipeline_steps:
+        lines.append("## Pipeline Status")
+        lines.append("| Step | Status | Detail |")
+        lines.append("|------|--------|--------|")
+        for step in ctx.pipeline_steps:
+            lines.append(f"| {step.name} | {step.emoji} {step.status} | {step.message} |")
+        lines.append("")
 
     # Supply chain
     lines.append("## Supply Chain Risk")

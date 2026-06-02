@@ -148,12 +148,22 @@ def _build_context(
         ctx["hunks"] = total_hunks
         ctx["_file_paths"] = changeset.paths()
 
-    # Dependency changes
+    # Dependency changes (supports both old DependencyChange and new DepChange)
     if dep_changes:
         for dc in dep_changes:
-            ctx["new_deps_count"] += len(dc.added)
-            ctx["removed_deps_count"] += len(dc.removed)
-            ctx["upgraded_deps_count"] += len(dc.upgraded)
+            if hasattr(dc, 'change_type'):
+                # New DepChange format
+                if dc.change_type == 'added':
+                    ctx["new_deps_count"] += 1
+                elif dc.change_type == 'removed':
+                    ctx["removed_deps_count"] += 1
+                elif dc.change_type == 'version_changed':
+                    ctx["upgraded_deps_count"] += 1
+            else:
+                # Old DependencyChange format
+                ctx["new_deps_count"] += len(dc.added)
+                ctx["removed_deps_count"] += len(dc.removed)
+                ctx["upgraded_deps_count"] += len(dc.upgraded)
         ctx["adds_new_dependency"] = ctx["new_deps_count"] > 0
         ctx["removes_dependency"] = ctx["removed_deps_count"] > 0
 

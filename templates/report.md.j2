@@ -22,6 +22,20 @@
 {% endif %}
 | **Generated** | {{ generated_at }} |
 
+{% if codesentinel_modified %}
+> ⚠️ **审查策略被本次PR修改** — 本次审查使用 base branch 配置，新策略将在合并后生效。
+
+{% endif %}
+{% if pipeline_steps %}
+## Pipeline Status
+
+| Step | Status | Detail |
+|------|--------|--------|
+{% for step in pipeline_steps %}
+| {{ step.name }} | {{ step.emoji }} {{ step.status }} | {{ step.message }} |
+{% endfor %}
+{% endif %}
+
 {% if warnings %}
 ## ⚠️ Warnings
 

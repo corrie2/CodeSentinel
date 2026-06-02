@@ -34,13 +34,20 @@ jobs:
           codesentinel review "${{ github.event.pull_request.html_url }}" \
             --format markdown \
             --output report.md
+        continue-on-error: true
 
       - name: Comment PR
+        if: success() || steps.audit.outcome == 'success'
         uses: actions/github-script@v7
         with:
           script: |
             const fs = require('fs');
-            const report = fs.readFileSync('report.md', 'utf8');
+            const reportPath = 'report.md';
+            if (!fs.existsSync(reportPath)) {
+              console.log('report.md not found, skipping comment');
+              return;
+            }
+            const report = fs.readFileSync(reportPath, 'utf8');
             const { owner, repo } = context.repo;
             const prNumber = context.payload.pull_request.number;
 
@@ -69,3 +76,4 @@ jobs:
         with:
           name: codesentinel-report
           path: report.md
+          if-no-files-found: ignore

@@ -149,3 +149,10 @@ description = "PR contains more than 20 diff hunks"
 condition = "hunks > 20"
 score_delta = 1
 tag = "complexity"
+
+# ---- Project-Specific Critical Paths (customise per project) ----
+
+[project]
+critical_paths = [
+    {path = "src/", weight = 30, reason = "Project source"},
+]
