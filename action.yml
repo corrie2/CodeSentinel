@@ -1,0 +1,73 @@
+name: "CodeSentinel — Change Ecosystem Auditor"
+description: "PR risk assessment and impact analysis. Outputs a structured audit report."
+author: "CodeSentinel"
+
+inputs:
+  pr_url:
+    description: "Pull request URL (auto-detected in GitHub Actions)"
+    required: false
+    default: ""
+  format:
+    description: "Output format: markdown or json"
+    required: false
+    default: "markdown"
+  skip_llm:
+    description: "Skip LLM deep review (faster, no API key needed)"
+    required: false
+    default: "false"
+  rules:
+    description: "Custom rules TOML file path"
+    required: false
+    default: ""
+  llm_provider:
+    description: "LLM provider: mimo, deepseek, or openai"
+    required: false
+    default: "mimo"
+
+outputs:
+  risk_level:
+    description: "Risk level: low, medium, or high"
+    value: ${{ steps.audit.outputs.risk_level }}
+  report_path:
+    description: "Path to the generated report"
+    value: ${{ steps.audit.outputs.report_path }}
+
+runs:
+  using: "composite"
+  steps:
+    - name: Install CodeSentinel
+      shell: bash
+      run: |
+        pip install git+https://github.com/YOUR_ORG/code-sentinel.git@main
+
+    - name: Run Audit
+      id: audit
+      shell: bash
+      env:
+        GITHUB_TOKEN: ${{ github.token }}
+        MIMO_API_KEY: ${{ secrets.MIMO_API_KEY }}
+        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+      run: |
+        PR_URL="${{ inputs.pr_url }}"
+        if [ -z "$PR_URL" ]; then
+          PR_URL="${{ github.event.pull_request.html_url }}"
+        fi
+
+        FORMAT="${{ inputs.format }}"
+        SKIP_LLM="${{ inputs.skip_llm }}"
+        RULES="${{ inputs.rules }}"
+
+        ARGS="review $PR_URL --format $FORMAT"
+        if [ "$SKIP_LLM" = "true" ]; then
+          ARGS="$ARGS --skip-llm"
+        fi
+        if [ -n "$RULES" ]; then
+          ARGS="$ARGS --rules $RULES"
+        fi
+
+        codesentinel $ARGS --output report.md
+
+        # Extract risk level for output
+        RISK=$(grep -oP '(?<=Risk Level: \*\*)\w+' report.md || echo "unknown")
+        echo "risk_level=$RISK" >> "$GITHUB_OUTPUT"
+        echo "report_path=report.md" >> "$GITHUB_OUTPUT"

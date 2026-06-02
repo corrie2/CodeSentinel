@@ -1,0 +1,151 @@
+# CodeSentinel Default Risk Rules
+# Each [[rules]] entry defines a rule that contributes to the overall risk score.
+
+[settings]
+low_risk_max = 3      # score <= this is LOW risk
+medium_risk_max = 6    # score <= this is MEDIUM risk, above is HIGH
+
+# ---- Change Size Rules ----
+
+[[rules]]
+name = "large_pr"
+description = "PR modifies more than 10 files"
+condition = "modified_files > 10"
+score_delta = 2
+tag = "size"
+
+[[rules]]
+name = "very_large_pr"
+description = "PR modifies more than 30 files"
+condition = "modified_files > 30"
+score_delta = 3
+tag = "size"
+
+[[rules]]
+name = "high_churn"
+description = "PR has more than 500 lines of changes"
+condition = "total_changes > 500"
+score_delta = 2
+tag = "size"
+
+[[rules]]
+name = "massive_churn"
+description = "PR has more than 2000 lines of changes"
+condition = "total_changes > 2000"
+score_delta = 3
+tag = "size"
+
+# ---- Module Risk Rules (sensitive directories) ----
+
+[[rules]]
+name = "touches_payment"
+description = "PR touches payment-related code"
+condition = "touches('payment/')"
+score_delta = 3
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_auth"
+description = "PR touches authentication/authorization code"
+condition = "touches('auth/')"
+score_delta = 3
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_core"
+description = "PR touches core platform code"
+condition = "touches('core/')"
+score_delta = 2
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_security"
+description = "PR touches security-sensitive code"
+condition = "touches('security/')"
+score_delta = 3
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_infra"
+description = "PR touches infrastructure or deployment code"
+condition = "touches('infra/')"
+score_delta = 2
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_config"
+description = "PR modifies configuration files"
+condition = "touches('config/')"
+score_delta = 1
+tag = "sensitive-module"
+
+# ---- Author Experience Rules ----
+
+[[rules]]
+name = "new_contributor_module"
+description = "Author is contributing to this module for the first time"
+condition = "author_first_time_in_module"
+score_delta = 2
+tag = "author-experience"
+
+# ---- Dependency Change Rules ----
+
+[[rules]]
+name = "new_dependency_added"
+description = "PR adds a new dependency"
+condition = "adds_new_dependency"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "multiple_new_deps"
+description = "PR adds more than 3 new dependencies"
+condition = "new_deps_count > 3"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "dependency_removed"
+description = "PR removes a dependency"
+condition = "removes_dependency"
+score_delta = 1
+tag = "dependency"
+
+[[rules]]
+name = "many_dep_upgrades"
+description = "PR upgrades more than 5 dependencies"
+condition = "upgraded_deps_count > 5"
+score_delta = 1
+tag = "dependency"
+
+# ---- High-Defect Module Rules ----
+
+[[rules]]
+name = "high_defect_module"
+description = "PR modifies a module with high defect density (>0.1)"
+condition = "module_defect_density > 0.1"
+score_delta = 3
+tag = "defect-prone"
+
+# ---- Code Structure Rules ----
+
+[[rules]]
+name = "many_functions_changed"
+description = "PR modifies more than 15 functions"
+condition = "unique_functions_changed > 15"
+score_delta = 2
+tag = "complexity"
+
+[[rules]]
+name = "many_classes_changed"
+description = "PR modifies more than 5 classes"
+condition = "unique_classes_changed > 5"
+score_delta = 2
+tag = "complexity"
+
+[[rules]]
+name = "many_hunks"
+description = "PR contains more than 20 diff hunks"
+condition = "hunks > 20"
+score_delta = 1
+tag = "complexity"
