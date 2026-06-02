@@ -16,13 +16,14 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+
       - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+        run: uv python install 3.11
 
       - name: Install CodeSentinel
-        run: pip install git+https://github.com/corrie2/code-sentinel.git@main
+        run: uv tool install git+https://github.com/corrie2/CodeSentinel.git@main
 
       - name: Run Audit
         id: audit
@@ -43,7 +44,6 @@ jobs:
             const { owner, repo } = context.repo;
             const prNumber = context.payload.pull_request.number;
 
-            // Find existing comment to update
             const comments = await github.rest.issues.listComments({
               owner, repo, issue_number: prNumber
             });
