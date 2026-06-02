@@ -1,4 +1,4 @@
-name: CodeSentinel — Change Ecosystem Audit
+name: CodeSentinel — Risk Advisor & Ecosystem Audit
 
 on:
   pull_request:

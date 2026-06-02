@@ -35,7 +35,7 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(
     title="CodeSentinel",
-    description="Change Ecosystem Auditor — Webhook receiver for automated PR review",
+    description="Risk Advisor & Ecosystem Auditor — Webhook receiver for automated PR review",
     version="0.1.0",
 )
 
@@ -83,7 +83,7 @@ async def index():
 <head><title>CodeSentinel</title></head>
 <body style="font-family:system-ui,sans-serif;max-width:600px;margin:2rem auto;padding:0 1rem">
   <h1>CodeSentinel</h1>
-  <p>Change Ecosystem Auditor &mdash; automated PR risk assessment and impact analysis.</p>
+  <p>Risk Advisor & Ecosystem Auditor &mdash; automated PR risk assessment and impact analysis.</p>
   <h2>Webhook Endpoints</h2>
   <table style="border-collapse:collapse;width:100%">
     <tr><td style="padding:4px 8px"><code>POST /webhook/github</code></td>

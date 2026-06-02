@@ -1,8 +1,8 @@
-# CodeSentinel — 变更生态审计官
+# CodeSentinel — Risk Advisor & Ecosystem Auditor
 
-不是"代码审查Bot"，而是"变更风险顾问"。
+PR 风险顾问 & 生态审计官。
 
-输入一个 PR，输出一份结构化的"变更影响评估报告"。
+输入一个 PR，输出一份结构化的风险评估报告。
 
 ## Quick Start
 

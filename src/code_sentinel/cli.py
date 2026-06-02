@@ -395,7 +395,7 @@ def cmd_config_set(args: argparse.Namespace) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="codesentinel",
-        description="CodeSentinel — Change Ecosystem Auditor: PR risk assessment and impact analysis",
+        description="CodeSentinel — Risk Advisor & Ecosystem Auditor: PR risk assessment and impact analysis",
     )
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
