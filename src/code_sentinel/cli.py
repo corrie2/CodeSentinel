@@ -121,6 +121,8 @@ async def _collect_pr_data(
             "url": f"https://github.com/{owner}/{repo}/pull/{pr_number}",
             "number": pr_number,
             "repo": f"{owner}/{repo}",
+            "base_sha": "",
+            "head_sha": "",
         },
         "diff": "",
         "changed_files": [],
@@ -132,6 +134,15 @@ async def _collect_pr_data(
             pr_info = await gh.get_pr(owner, repo, pr_number)
             result["pr"]["title"] = pr_info.title
             result["pr"]["author"] = pr_info.author
+
+            # Extract actual commit SHAs for get_file_content (Layer 3 dep scan)
+            try:
+                raw_pr = await gh._get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+                result["pr"]["base_sha"] = raw_pr.get("base", {}).get("sha", "")
+                result["pr"]["head_sha"] = raw_pr.get("head", {}).get("sha", "")
+            except Exception:
+                result["pr"]["base_sha"] = ""
+                result["pr"]["head_sha"] = ""
 
             # Diff
             result["diff"] = await gh.get_diff(owner, repo, pr_number)
@@ -205,18 +216,108 @@ async def _run_pipeline(
     print("  [2/6] Parsing diff...", file=sys.stderr)
     changeset = parse_diff(raw_diff) if raw_diff else None
 
-    # ── Step 3: Dependency changes (from diff) ───────────────────
-    # For MVP we scan the diff for dependency file changes.
-    # A full implementation would compare old/new file content via the API.
+    # ── Step 3: Dependency scanning (3-layer pipeline) ───────────
+    print("  [3/6] Scanning dependency changes...", file=sys.stderr)
     dep_changes: list = []
+    if changeset:
+        from code_sentinel.collector.dep_scanner import (
+            scan_diff_for_dep_files,
+            parse_dep_changes_from_patch,
+            compute_dep_diff,
+        )
 
-    # ── Step 4: Parse CODEOWNERS ─────────────────────────────────
+        dep_filenames = scan_diff_for_dep_files(changeset.files)
+        if dep_filenames:
+            print(f"         Detected {len(dep_filenames)} dependency manifest(s): {', '.join(dep_filenames)}", file=sys.stderr)
+
+            # Build filename -> patch map from raw diff
+            file_patch_map: dict[str, str] = {}
+            _current_file = None
+            _current_lines: list[str] = []
+            for _line in raw_diff.splitlines():
+                if _line.startswith("+++ b/"):
+                    if _current_file:
+                        file_patch_map[_current_file] = "\n".join(_current_lines)
+                    _current_file = _line[len("+++ b/"):]
+                    _current_lines = [_line]
+                elif _current_file is not None:
+                    _current_lines.append(_line)
+            if _current_file:
+                file_patch_map[_current_file] = "\n".join(_current_lines)
+
+            # Layer 2: Parse patches for each dep file
+            for dep_file in dep_filenames:
+                patch = file_patch_map.get(dep_file, "")
+                changes = parse_dep_changes_from_patch(dep_file, patch)
+                dep_changes.extend(changes)
+
+            # Layer 3: Resolve low-confidence changes with full file content
+            low_conf_files = {
+                dep_file for dep_file in dep_filenames
+                if any(c.confidence == "low" for c in dep_changes
+                       if dep_file.rsplit("/", 1)[-1] in dep_file)
+            }
+            # More precise: check which dep_files produced low-confidence changes
+            _dep_basenames = {f.rsplit("/", 1)[-1] for f in dep_filenames}
+            low_conf_files = set()
+            for dc in dep_changes:
+                if dc.confidence == "low":
+                    low_conf_files.add(dc.package)
+
+            if low_conf_files:
+                base_sha = pr_data.get("pr", {}).get("base_sha", "")
+                head_sha = pr_data.get("pr", {}).get("head_sha", "")
+                if base_sha and head_sha:
+                    from code_sentinel.git_provider.github import GitHubProvider
+                    async with GitHubProvider(config_obj) as gh_layer3:
+                        for dep_file in dep_filenames:
+                            try:
+                                old_content = await gh_layer3.get_file_content(owner, repo, dep_file, ref=base_sha)
+                                new_content = await gh_layer3.get_file_content(owner, repo, dep_file, ref=head_sha)
+                                if old_content or new_content:
+                                    layer3_changes = compute_dep_diff(dep_file, old_content, new_content)
+                                    # Replace low-confidence entries for this file's ecosystem
+                                    dep_changes = [c for c in dep_changes if c.confidence != "low"]
+                                    dep_changes.extend(layer3_changes)
+                            except Exception as exc:
+                                logger.warning("Layer 3 dep scan failed for %s: %s", dep_file, exc)
+
+            print(f"         Found {len(dep_changes)} dependency change(s)", file=sys.stderr)
+        else:
+            print("         No dependency files in changeset", file=sys.stderr)
+
+    # ── Step 4: Project context (project_profile.md + review_policy.md) ──
+    project_context = ""
+    if args.repo_path:
+        repo_root = Path(args.repo_path).resolve()
+        _SENSITIVE_WORDS = re.compile(
+            r"\b(?:key|token|secret|password|credential)\b|"
+            r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|"
+            r"private[_-]?key|client[_-]?secret)",
+            re.IGNORECASE,
+        )
+        for ctx_file in ("project_profile.md", "review_policy.md"):
+            ctx_path = repo_root / ".codesentinel" / ctx_file
+            if ctx_path.exists():
+                try:
+                    raw = ctx_path.read_text(encoding="utf-8")
+                    sanitized = "\n".join(
+                        line for line in raw.splitlines()
+                        if not _SENSITIVE_WORDS.search(line)
+                    )
+                    project_context += f"\n\n## {ctx_file}\n\n{sanitized}"
+                except Exception as exc:
+                    logger.warning("Failed to read %s: %s", ctx_path, exc)
+        if project_context:
+            print(f"         Loaded project context from .codesentinel/", file=sys.stderr)
+
+    # ── Step 5: Parse CODEOWNERS ─────────────────────────────────
     codeowners = None
     if args.repo_path:
         from code_sentinel.collector.codeowners import load_codeowners
         codeowners = load_codeowners(args.repo_path)
 
-    # ── Step 5: Project memory ───────────────────────────────────
+    # ── Step 6: Project memory ───────────────────────────────────
     module_densities: Dict[str, float] = {}
     memory = None
     memory_db_path = args.memory_db or config_dict.get("memory_db_path", "")
@@ -240,7 +341,7 @@ async def _run_pipeline(
         except Exception as exc:
             logger.warning("Failed to update memory from git: %s", exc)
 
-    # ── Step 6: Risk scoring ─────────────────────────────────────
+    # ── Step 7: Risk scoring ─────────────────────────────────────
     print("  [4/6] Computing risk score...", file=sys.stderr)
     rules_path = args.rules or config_dict.get("rules_file") or None
     risk_score = assess_risk(
@@ -268,7 +369,29 @@ async def _run_pipeline(
         from code_sentinel.auditor.supply_chain import run_supply_chain_audit
         from code_sentinel.auditor.impact import assess_impact
 
-        supply_chain_report = await run_supply_chain_audit(changed_files=changed_files)
+        # Build PackageQuery objects from dep_changes for supply chain audit
+        supply_chain_packages = None
+        if dep_changes:
+            from code_sentinel.auditor.supply_chain import (
+                PackageQuery as SC_PackageQuery,
+            )
+            _OSV_ECOSYSTEM_MAP = {
+                "npm": "npm", "pypi": "PyPI", "go": "Go",
+                "cargo": "crates.io", "maven": "Maven", "gradle": "Maven",
+            }
+            supply_chain_packages = [
+                SC_PackageQuery(
+                    name=c.package,
+                    version=c.new_spec or c.old_spec or "",
+                    ecosystem=_OSV_ECOSYSTEM_MAP.get(c.ecosystem, c.ecosystem),
+                )
+                for c in dep_changes
+                if c.change_type in ("added", "version_changed") and (c.new_spec or c.old_spec)
+            ]
+        supply_chain_report = await run_supply_chain_audit(
+            changed_files=changed_files,
+            packages=supply_chain_packages or None,
+        )
         impact_report = assess_impact(changed_files)
 
         if risk_score.level == RiskLevel.HIGH:
@@ -285,6 +408,7 @@ async def _run_pipeline(
                         config=config_obj,
                         raw_diff=raw_diff,
                         module_densities=module_densities or None,
+                        project_context=project_context or None,
                     )
                     if findings:
                         deep_review_findings = ReviewResults(
@@ -318,6 +442,20 @@ async def _run_pipeline(
             findings=findings_list,
         )
 
+    # ── File ranking for human attention ──────────────────────────
+    needs_attention: list = []
+    if changeset:
+        from code_sentinel.risk.file_ranker import get_top_files
+        _high_defect = (
+            [m for m, d in module_densities.items() if d >= 0.1]
+            if module_densities else []
+        )
+        risk_ctx = {
+            "high_defect_modules": _high_defect,
+            "critical_paths": [],
+        }
+        needs_attention = get_top_files(changeset, n=10, risk_context=risk_ctx)
+
     # ── Build report ─────────────────────────────────────────────
     pr_meta = PRMetadata(**pr_data.get("pr", {}))
     ctx = build_report_context(
@@ -328,19 +466,29 @@ async def _run_pipeline(
             "triggered_rules": risk_score.triggered_rules,
             "tags": risk_score.tags,
         },
+        risk_breakdown=risk_score.breakdown_lines,
         supply_chain_report=supply_chain_report,
         impact_report=impact_report,
         deep_review=deep_review_findings,
+        needs_attention=needs_attention,
     )
 
     # ── Render output ────────────────────────────────────────────
     fmt = args.format or config_dict.get("default_format", "markdown")
     if fmt == "json":
-        print(render_json(ctx))
+        output_text = render_json(ctx)
     elif fmt == "pr-comment":
-        print(render_pr_comment(ctx))
+        output_text = render_pr_comment(ctx)
     else:
-        print(render_markdown(ctx))
+        output_text = render_markdown(ctx)
+
+    # Write to file or stdout
+    output_path = getattr(args, "output", None)
+    if output_path:
+        Path(output_path).write_text(output_text, encoding="utf-8")
+        print(f"Report written to {output_path}", file=sys.stderr)
+    else:
+        print(output_text)
 
     return 0
 
@@ -389,6 +537,476 @@ def cmd_config_set(args: argparse.Namespace) -> int:
     return 0
 
 
+# ── Init Command ───────────────────────────────────────────────
+
+
+_ECOSYSTEM_MARKERS = {
+    "npm": "package.json",
+    "go": "go.mod",
+    "python": "requirements.txt",
+    "rust": "Cargo.toml",
+}
+
+_ECOSYSTEM_CRITICAL_PATHS: dict[str, list[tuple[str, str, int, str]]] = {
+    "npm": [
+        ("touches_package_json", "PR modifies package.json", 2, "sensitive-module"),
+        ("touches_lockfile", "PR modifies package-lock.json or yarn.lock", 1, "dependency"),
+        ("touches_node_modules", "PR modifies node_modules/", 3, "sensitive-module"),
+    ],
+    "go": [
+        ("touches_go_mod", "PR modifies go.mod or go.sum", 2, "dependency"),
+        ("touches_vendor", "PR modifies vendor/ directory", 2, "sensitive-module"),
+    ],
+    "python": [
+        ("touches_setup", "PR modifies setup.py, setup.cfg, or pyproject.toml", 2, "sensitive-module"),
+        ("touches_requirements", "PR modifies requirements*.txt", 2, "dependency"),
+        ("touches_venv", "PR modifies virtualenv or venv directory", 3, "sensitive-module"),
+    ],
+    "rust": [
+        ("touches_cargo_toml", "PR modifies Cargo.toml or Cargo.lock", 2, "dependency"),
+        ("touches_target", "PR modifies target/ directory", 3, "sensitive-module"),
+    ],
+}
+
+_ECOSYSTEM_EXTRA_RULES: dict[str, str] = {
+    "npm": """
+# ---- Ecosystem: npm ----
+
+[[rules]]
+name = "touches_package_json"
+description = "PR modifies package.json"
+condition = "touches('package.json')"
+score_delta = 2
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_lockfile"
+description = "PR modifies package-lock.json or yarn.lock"
+condition = "touches('package-lock.json') or touches('yarn.lock')"
+score_delta = 1
+tag = "dependency"
+
+[[rules]]
+name = "touches_node_modules"
+description = "PR modifies node_modules/ directory"
+condition = "touches('node_modules/')"
+score_delta = 3
+tag = "sensitive-module"
+""",
+    "go": """
+# ---- Ecosystem: Go ----
+
+[[rules]]
+name = "touches_go_mod"
+description = "PR modifies go.mod or go.sum"
+condition = "touches('go.mod') or touches('go.sum')"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "touches_vendor"
+description = "PR modifies vendor/ directory"
+condition = "touches('vendor/')"
+score_delta = 2
+tag = "sensitive-module"
+""",
+    "python": """
+# ---- Ecosystem: Python ----
+
+[[rules]]
+name = "touches_setup"
+description = "PR modifies setup.py, setup.cfg, or pyproject.toml"
+condition = "touches('setup.py') or touches('setup.cfg') or touches('pyproject.toml')"
+score_delta = 2
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_requirements"
+description = "PR modifies requirements*.txt"
+condition = "touches('requirements')"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "touches_venv"
+description = "PR modifies virtualenv or venv directory"
+condition = "touches('.venv/') or touches('venv/')"
+score_delta = 3
+tag = "sensitive-module"
+""",
+    "rust": """
+# ---- Ecosystem: Rust ----
+
+[[rules]]
+name = "touches_cargo_toml"
+description = "PR modifies Cargo.toml or Cargo.lock"
+condition = "touches('Cargo.toml') or touches('Cargo.lock')"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "touches_target"
+description = "PR modifies target/ directory"
+condition = "touches('target/')"
+score_delta = 3
+tag = "sensitive-module"
+""",
+}
+
+
+def _detect_ecosystem() -> str | None:
+    """Auto-detect the project ecosystem from marker files in cwd."""
+    cwd = Path.cwd()
+    for ecosystem, marker in _ECOSYSTEM_MARKERS.items():
+        # python checks two files
+        if ecosystem == "python":
+            if (cwd / "requirements.txt").exists() or (cwd / "pyproject.toml").exists():
+                return "python"
+        elif (cwd / marker).exists():
+            return ecosystem
+    return None
+
+
+def _build_rules_toml(ecosystem: str | None, critical_paths: list[str] | None) -> str:
+    """Build the rules.toml content from the default template + ecosystem rules."""
+    # Try to read the packaged default rules
+    default_rules_path = Path(__file__).resolve().parent.parent.parent.parent / "rules" / "default.toml"
+    if not default_rules_path.exists():
+        # Fallback: try relative to package dir
+        default_rules_path = Path(__file__).resolve().parent.parent / "rules" / "default.toml"
+
+    if default_rules_path.exists():
+        with open(default_rules_path) as f:
+            content = f.read()
+    else:
+        # Hardcoded fallback
+        content = _HARDCODED_DEFAULT_RULES
+
+    # Append project.critical_paths section
+    content += "\n# ---- Project-Specific Critical Paths (customise these) ----\n\n[project]\ncritical_paths = [\n"
+    if critical_paths:
+        for p in critical_paths:
+            content += f'    "{p}",\n'
+    else:
+        content += '    "src/",\n'
+    content += "]\n"
+
+    # Append ecosystem-specific rules
+    if ecosystem and ecosystem in _ECOSYSTEM_EXTRA_RULES:
+        content += _ECOSYSTEM_EXTRA_RULES[ecosystem]
+
+    return content
+
+
+_HARDCODED_DEFAULT_RULES = """\
+# CodeSentinel Default Risk Rules
+# Each [[rules]] entry defines a rule that contributes to the overall risk score.
+
+[settings]
+low_risk_max = 3      # score <= this is LOW risk
+medium_risk_max = 6    # score <= this is MEDIUM risk, above is HIGH
+
+# ---- Change Size Rules ----
+
+[[rules]]
+name = "large_pr"
+description = "PR modifies more than 10 files"
+condition = "modified_files > 10"
+score_delta = 2
+tag = "size"
+
+[[rules]]
+name = "very_large_pr"
+description = "PR modifies more than 30 files"
+condition = "modified_files > 30"
+score_delta = 3
+tag = "size"
+
+[[rules]]
+name = "high_churn"
+description = "PR has more than 500 lines of changes"
+condition = "total_changes > 500"
+score_delta = 2
+tag = "size"
+
+[[rules]]
+name = "massive_churn"
+description = "PR has more than 2000 lines of changes"
+condition = "total_changes > 2000"
+score_delta = 3
+tag = "size"
+
+# ---- Module Risk Rules (sensitive directories) ----
+
+[[rules]]
+name = "touches_payment"
+description = "PR touches payment-related code"
+condition = "touches('payment/')"
+score_delta = 3
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_auth"
+description = "PR touches authentication/authorization code"
+condition = "touches('auth/')"
+score_delta = 3
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_core"
+description = "PR touches core platform code"
+condition = "touches('core/')"
+score_delta = 2
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_security"
+description = "PR touches security-sensitive code"
+condition = "touches('security/')"
+score_delta = 3
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_infra"
+description = "PR touches infrastructure or deployment code"
+condition = "touches('infra/')"
+score_delta = 2
+tag = "sensitive-module"
+
+[[rules]]
+name = "touches_config"
+description = "PR modifies configuration files"
+condition = "touches('config/')"
+score_delta = 1
+tag = "sensitive-module"
+
+# ---- Author Experience Rules ----
+
+[[rules]]
+name = "new_contributor_module"
+description = "Author is contributing to this module for the first time"
+condition = "author_first_time_in_module"
+score_delta = 2
+tag = "author-experience"
+
+# ---- Dependency Change Rules ----
+
+[[rules]]
+name = "new_dependency_added"
+description = "PR adds a new dependency"
+condition = "adds_new_dependency"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "multiple_new_deps"
+description = "PR adds more than 3 new dependencies"
+condition = "new_deps_count > 3"
+score_delta = 2
+tag = "dependency"
+
+[[rules]]
+name = "dependency_removed"
+description = "PR removes a dependency"
+condition = "removes_dependency"
+score_delta = 1
+tag = "dependency"
+
+[[rules]]
+name = "many_dep_upgrades"
+description = "PR upgrades more than 5 dependencies"
+condition = "upgraded_deps_count > 5"
+score_delta = 1
+tag = "dependency"
+
+# ---- High-Defect Module Rules ----
+
+[[rules]]
+name = "high_defect_module"
+description = "PR modifies a module with high defect density (>0.1)"
+condition = "module_defect_density > 0.1"
+score_delta = 3
+tag = "defect-prone"
+
+# ---- Code Structure Rules ----
+
+[[rules]]
+name = "many_functions_changed"
+description = "PR modifies more than 15 functions"
+condition = "unique_functions_changed > 15"
+score_delta = 2
+tag = "complexity"
+
+[[rules]]
+name = "many_classes_changed"
+description = "PR modifies more than 5 classes"
+condition = "unique_classes_changed > 5"
+score_delta = 2
+tag = "complexity"
+
+[[rules]]
+name = "many_hunks"
+description = "PR contains more than 20 diff hunks"
+condition = "hunks > 20"
+score_delta = 1
+tag = "complexity"
+"""
+
+
+_PROJECT_PROFILE_TEMPLATE = """\
+# Project Profile
+
+> Fill in this template to give CodeSentinel context about your project.
+> The more detail you provide, the better the risk assessments will be.
+
+## Overview
+
+<!-- What does this project do? Who are the users? -->
+<!-- e.g. "A REST API for managing user accounts in a SaaS platform." -->
+
+
+## Architecture
+
+<!-- Describe the high-level architecture: monolith, microservices, event-driven, etc. -->
+<!-- e.g. "Monolithic Django app with PostgreSQL, Redis cache, and Celery workers." -->
+
+
+## Key Modules
+
+<!-- List the most important modules/packages and what they do. -->
+<!-- e.g. -->
+<!-- - `src/auth/` — Authentication and session management -->
+<!-- - `src/payments/` — Stripe integration and billing logic -->
+<!-- - `src/api/` — REST API endpoints -->
+
+
+## Tech Stack
+
+<!-- Languages, frameworks, databases, infrastructure. -->
+<!-- e.g. Python 3.11, Django 4.2, PostgreSQL 15, Redis 7, Docker, AWS ECS -->
+
+
+## Known Issues
+
+<!-- Document any known technical debt, fragile areas, or workarounds. -->
+<!-- e.g. "The payments module has no tests — changes there require manual QA." -->
+
+"""
+
+
+_REVIEW_POLICY_TEMPLATE = """\
+# Review Policy
+
+> Customise this policy to control how CodeSentinel evaluates pull requests.
+
+## Block Conditions
+
+<!-- Conditions that should ALWAYS block a PR from merging. -->
+<!-- e.g. -->
+<!-- - Any change touching `src/auth/` without a security review label -->
+<!-- - PRs that modify more than 50 files -->
+<!-- - PRs that remove test files without adding replacements -->
+
+- (add your block conditions here)
+
+## Required Tests
+
+<!-- What tests must pass before a PR can be approved? -->
+<!-- e.g. -->
+<!-- - All unit tests pass (`pytest`) -->
+<!-- - Integration tests for payment module pass -->
+<!-- - No decrease in code coverage for `src/auth/` -->
+
+- (add your required tests here)
+
+## Historical Pitfalls
+
+<!-- Problems that have occurred in the past — CodeSentinel will watch for similar patterns. -->
+<!-- e.g. -->
+<!-- - "2024-01: ORM migration broke production — always run migration tests" -->
+<!-- - "2024-03: New dependency introduced license incompatibility — check licenses" -->
+
+- (add historical pitfalls here)
+
+## Performance Budgets
+
+<!-- Performance constraints that changes must respect. -->
+<!-- e.g. -->
+<!-- - API p99 latency must stay under 200ms -->
+<!-- - Database queries must not exceed 50ms -->
+<!-- - Bundle size must not increase by more than 10KB -->
+
+- (add performance budgets here)
+"""
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    """Initialise a .codesentinel/ directory in the current project."""
+    sentinel_dir = Path(".codesentinel")
+    force = getattr(args, "force", False)
+    minimal = getattr(args, "minimal", False)
+
+    # Check if .codesentinel/ already exists
+    if sentinel_dir.exists() and not force:
+        existing = [f.name for f in sentinel_dir.iterdir()]
+        if existing:
+            print(
+                f"Error: .codesentinel/ already exists ({', '.join(existing)}). "
+                "Use --force to overwrite.",
+                file=sys.stderr,
+            )
+            return 1
+
+    sentinel_dir.mkdir(parents=True, exist_ok=True)
+
+    # Auto-detect ecosystem
+    ecosystem = _detect_ecosystem()
+
+    # Determine critical paths based on ecosystem
+    critical_paths: list[str] = ["src/"]
+    if ecosystem == "npm":
+        critical_paths = ["src/", "package.json"]
+    elif ecosystem == "go":
+        critical_paths = ["cmd/", "internal/", "pkg/"]
+    elif ecosystem == "python":
+        critical_paths = ["src/", "setup.py", "pyproject.toml"]
+    elif ecosystem == "rust":
+        critical_paths = ["src/", "Cargo.toml"]
+
+    # Generate rules.toml
+    rules_content = _build_rules_toml(ecosystem, critical_paths)
+    rules_path = sentinel_dir / "rules.toml"
+    with open(rules_path, "w") as f:
+        f.write(rules_content)
+    print(f"  Created {rules_path}" + (f" (ecosystem: {ecosystem})" if ecosystem else ""))
+
+    if minimal:
+        print(f"\nInitialized .codesentinel/ (minimal mode)")
+        print(f"  Edit {rules_path} to customise risk rules.")
+        return 0
+
+    # Generate project_profile.md
+    profile_path = sentinel_dir / "project_profile.md"
+    with open(profile_path, "w") as f:
+        f.write(_PROJECT_PROFILE_TEMPLATE)
+    print(f"  Created {profile_path}")
+
+    # Generate review_policy.md
+    policy_path = sentinel_dir / "review_policy.md"
+    with open(policy_path, "w") as f:
+        f.write(_REVIEW_POLICY_TEMPLATE)
+    print(f"  Created {policy_path}")
+
+    print(f"\nInitialized .codesentinel/ in {Path.cwd()}")
+    if ecosystem:
+        print(f"  Detected ecosystem: {ecosystem}")
+    print(f"  Next steps:")
+    print(f"    1. Edit {rules_path} to tune risk rules")
+    print(f"    2. Fill in {profile_path} with project context")
+    print(f"    3. Define review policies in {policy_path}")
+    return 0
+
+
 # ── Argument Parser ──────────────────────────────────────────────
 
 
@@ -432,6 +1050,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Path to project memory SQLite database",
     )
+    review_parser.add_argument(
+        "--output",
+        "-o",
+        default=None,
+        help="Write report to file instead of stdout",
+    )
 
     # Config command
     config_parser = subparsers.add_parser("config", help="Manage configuration")
@@ -441,6 +1065,25 @@ def build_parser() -> argparse.ArgumentParser:
     serve_parser.add_argument("--port", type=int, default=8080, help="Port (default: 8080)")
     serve_parser.add_argument("--host", default="0.0.0.0", help="Host (default: 0.0.0.0)")
     serve_parser.add_argument("--webhook-secret", default="", help="Webhook secret for signature verification")
+
+    # init
+    init_parser = subparsers.add_parser(
+        "init",
+        help="Initialise .codesentinel/ directory in the current project",
+    )
+    init_parser.add_argument(
+        "--minimal",
+        action="store_true",
+        default=False,
+        help="Only generate rules.toml (skip project_profile.md and review_policy.md)",
+    )
+    init_parser.add_argument(
+        "--force",
+        action="store_true",
+        default=False,
+        help="Overwrite existing files if .codesentinel/ already exists",
+    )
+
     config_sub = config_parser.add_subparsers(dest="config_command")
 
     config_sub.add_parser("show", help="Show current configuration")
@@ -482,6 +1125,9 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "serve":
         return cmd_serve(args)
+
+    if args.command == "init":
+        return cmd_init(args)
 
     if args.command == "config":
         if args.config_command == "show":

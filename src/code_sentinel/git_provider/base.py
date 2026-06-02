@@ -160,6 +160,29 @@ class BaseGitProvider(ABC):
         """
         ...
 
+    async def get_file_content(
+        self, owner: str, repo: str, path: str, ref: str = "main"
+    ) -> str:
+        """Get raw file content at a specific ref.
+
+        Parameters
+        ----------
+        owner : str
+            Repository owner (user or organisation).
+        repo : str
+            Repository name.
+        path : str
+            File path within the repository.
+        ref : str
+            Git ref (branch, tag, or commit SHA). Defaults to ``"main"``.
+
+        Returns
+        -------
+        str
+            The raw file content, or an empty string if the file does not exist.
+        """
+        raise NotImplementedError
+
 
 class ProviderError(Exception):
     """Raised when a git-provider API call fails irrecoverably."""

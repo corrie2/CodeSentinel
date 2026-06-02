@@ -64,6 +64,7 @@ def _build_user_prompt(
     changeset: Any,
     risk_score: RiskScore,
     module_densities: Optional[Dict[str, float]] = None,
+    ranked_files: Optional[list] = None,
 ) -> str:
     """Build the user-facing prompt containing the diff and context.
 
@@ -90,13 +91,19 @@ def _build_user_prompt(
 
     parts.append("")
 
-    # Diff section — top N high-risk files
-    # Rank files by total changes (proxy for risk)
-    sorted_files = sorted(
-        changeset.files,
-        key=lambda f: f.lines_added + f.lines_deleted,
-        reverse=True,
-    )[:_MAX_HIGH_RISK_FILES]
+    # Diff section — top N high-risk files (ranked by file_ranker)
+    # Use ranked files if available, otherwise fall back to size-based sort
+    if ranked_files:
+        ranked_paths = [rf.path for rf in ranked_files]
+        sorted_files = [
+            f for f in changeset.files if f.path in ranked_paths
+        ][:_MAX_HIGH_RISK_FILES]
+    else:
+        sorted_files = sorted(
+            changeset.files,
+            key=lambda f: f.lines_added + f.lines_deleted,
+            reverse=True,
+        )[:_MAX_HIGH_RISK_FILES]
 
     parts.append("## Changed Files (high-risk subset)")
     for f in sorted_files:
@@ -205,6 +212,7 @@ async def run_deep_review(
     config: Config,
     raw_diff: str = "",
     module_densities: Optional[Dict[str, float]] = None,
+    project_context: Optional[str] = None,
 ) -> List[DeepFinding]:
     """Perform an LLM-powered deep code review of high-risk files.
 
@@ -217,6 +225,8 @@ async def run_deep_review(
         config: Application :class:`Config` (provides LLM credentials).
         raw_diff: The original raw diff text (optional, for richer context).
         module_densities: Module defect densities from project memory.
+        project_context: Optional project profile and review policy context
+            from .codesentinel/ config files (already sanitized).
 
     Returns:
         A list of :class:`DeepFinding` objects.
@@ -225,26 +235,45 @@ async def run_deep_review(
         logger.info("No files in changeset, skipping deep review")
         return []
 
-    # Build user prompt
-    user_prompt = _build_user_prompt(changeset, risk_score, module_densities)
+    # Rank files using file_ranker for smarter file selection
+    from code_sentinel.risk.file_ranker import get_top_files
+    _high_defect = (
+        [m for m, d in module_densities.items() if d >= 0.1]
+        if module_densities else []
+    )
+    risk_ctx = {
+        "high_defect_modules": _high_defect,
+        "critical_paths": [],
+    }
+    ranked_files = get_top_files(
+        changeset, n=_MAX_HIGH_RISK_FILES, risk_context=risk_ctx
+    )
+    ranked_paths = {rf.path for rf in ranked_files}
 
-    # Build the full diff content for the top files (if raw_diff provided)
-    sorted_files = sorted(
-        changeset.files,
-        key=lambda f: f.lines_added + f.lines_deleted,
-        reverse=True,
-    )[:_MAX_HIGH_RISK_FILES]
-    top_paths = {f.path for f in sorted_files}
+    # Build user prompt (uses ranked files)
+    user_prompt = _build_user_prompt(
+        changeset, risk_score, module_densities, ranked_files=ranked_files
+    )
 
-    # If we have the raw diff, try to extract relevant sections
+    # If we have the raw diff, extract relevant sections for ranked files
     diff_section = ""
     if raw_diff:
-        diff_sections = _extract_diff_sections(raw_diff, top_paths)
+        diff_sections = _extract_diff_sections(raw_diff, ranked_paths)
         if diff_sections:
             diff_section = "\n\n## Actual Diff Content\n" + diff_sections
 
+    # Build system prompt (optionally prepend project context)
+    system_prompt = DEEP_REVIEW_PROMPT
+    if project_context:
+        system_prompt = (
+            "## Project Context\n\n"
+            + project_context.strip()
+            + "\n\n---\n\n"
+            + DEEP_REVIEW_PROMPT
+        )
+
     messages = [
-        {"role": "system", "content": DEEP_REVIEW_PROMPT},
+        {"role": "system", "content": system_prompt},
         {"role": "user", "content": user_prompt + diff_section},
     ]
 

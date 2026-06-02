@@ -175,6 +175,70 @@ class GitHubProvider(BaseGitProvider):
             description=data.get("description"),
         )
 
+    async def get_file_content(
+        self, owner: str, repo: str, path: str, ref: str = "main"
+    ) -> str:
+        """Get raw file content from GitHub at a specific ref.
+
+        Returns an empty string if the file does not exist (404).
+        """
+        client = await self._get_client()
+        headers = {
+            **self._config.github_headers,
+            "Accept": "application/vnd.github.raw+json",
+        }
+        url = f"/repos/{owner}/{repo}/contents/{path}"
+        params = {"ref": ref}
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                resp = await client.get(url, params=params, headers=headers)
+
+                if resp.status_code == 404:
+                    return ""
+
+                # Rate-limit handling
+                if resp.status_code == 403 and self._is_rate_limited(resp):
+                    await self._wait_rate_limit(resp, attempt)
+                    continue
+
+                resp.raise_for_status()
+                return resp.text
+
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    return ""
+                status = exc.response.status_code
+                if status in (429, 500, 502, 503):
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "GitHub GET %s attempt %d/%d got %d, retrying in %ds",
+                        url, attempt, self._max_retries, status, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise ProviderError(
+                    f"GitHub API error ({status}) on GET {url}: {exc.response.text}",
+                    status_code=status,
+                ) from exc
+
+            except httpx.RequestError as exc:
+                if attempt < self._max_retries:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "GitHub GET %s attempt %d/%d network error, retrying in %ds",
+                        url, attempt, self._max_retries, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise ProviderError(
+                    f"Network error on GET {url}: {exc}"
+                ) from exc
+
+        raise ProviderError(
+            f"All {self._max_retries} attempts failed for GET {url}"
+        )
+
     # ── Internal HTTP helpers ────────────────────────────────────────
 
     async def _get(

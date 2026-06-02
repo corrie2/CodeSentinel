@@ -42,6 +42,7 @@ class ReportContext:
     risk_score: int = 0
     risk_level: str = "low"  # low, medium, high
     risk_details: dict[str, Any] = field(default_factory=dict)
+    risk_breakdown: list[str] = field(default_factory=list)
 
     # Supply chain
     total_deps: int = 0
@@ -67,6 +68,9 @@ class ReportContext:
 
     # Deep review
     deep_review: ReviewResults | None = None
+
+    # File ranking (needs human attention)
+    needs_attention: list[dict[str, Any]] = field(default_factory=list)
 
     # Recommendations
     recommendations: list[str] = field(default_factory=list)
@@ -99,9 +103,11 @@ def build_report_context(
     risk_score: int = 0,
     risk_level: str = "low",
     risk_details: dict[str, Any] | None = None,
+    risk_breakdown: list[str] | None = None,
     supply_chain_report: Any = None,
     impact_report: Any = None,
     deep_review: ReviewResults | None = None,
+    needs_attention: list | None = None,
 ) -> ReportContext:
     """Build a ReportContext from individual audit results."""
     ctx = ReportContext(
@@ -109,6 +115,7 @@ def build_report_context(
         risk_score=risk_score,
         risk_level=risk_level,
         risk_details=risk_details or {},
+        risk_breakdown=risk_breakdown or [],
     )
 
     # Map supply chain report
@@ -161,6 +168,19 @@ def build_report_context(
         ctx.dependency_changes = list(impact_report.dependency_changes)
 
     ctx.deep_review = deep_review
+
+    # Map file ranker results
+    if needs_attention:
+        ctx.needs_attention = [
+            {
+                "path": rf.path,
+                "score": rf.score,
+                "reasons": rf.reasons,
+                "needs_attention": rf.needs_attention,
+            }
+            if hasattr(rf, "path") else rf
+            for rf in needs_attention
+        ]
 
     # Generate recommendations
     ctx.recommendations = _generate_recommendations(ctx)
@@ -229,6 +249,7 @@ def render_markdown(ctx: ReportContext, template_dir: Path | None = None) -> str
         risk_score=ctx.risk_score,
         risk_level=ctx.risk_level,
         risk_details=ctx.risk_details,
+        risk_breakdown=ctx.risk_breakdown,
         total_deps=ctx.total_deps,
         vulnerable_deps=ctx.vulnerable_deps,
         deprecated_deps=ctx.deprecated_deps,
@@ -248,6 +269,7 @@ def render_markdown(ctx: ReportContext, template_dir: Path | None = None) -> str
         ci_changes=ctx.ci_changes,
         dependency_changes=ctx.dependency_changes,
         deep_review=ctx.deep_review,
+        needs_attention=ctx.needs_attention,
         recommendations=ctx.recommendations,
         generated_at=ctx.generated_at,
     )
@@ -302,6 +324,7 @@ def render_json(ctx: ReportContext) -> str:
             "warnings": ctx.warnings,
         },
         "recommendations": ctx.recommendations,
+        "needs_attention": ctx.needs_attention,
         "generated_at": ctx.generated_at,
     }
     if ctx.deep_review:
@@ -369,6 +392,16 @@ def _render_inline(ctx: ReportContext) -> str:
         for finding in ctx.deep_review.findings:
             lines.append(f"- **{finding.get('severity', 'info')}**: {finding.get('description', '')}")
         lines.append("")
+
+    # Files needing human attention
+    if ctx.needs_attention:
+        attention_files = [f for f in ctx.needs_attention if f.get("needs_attention", False)]
+        if attention_files:
+            lines.append("## Files Needing Human Attention")
+            for f in attention_files:
+                reasons_str = "; ".join(f.get("reasons", []))
+                lines.append(f"- **`{f['path']}`** (score: {f.get('score', 0)}) — {reasons_str}")
+            lines.append("")
 
     # Recommendations
     lines.append("## Recommendations")

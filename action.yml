@@ -38,7 +38,7 @@ runs:
     - name: Install CodeSentinel
       shell: bash
       run: |
-        pip install git+https://github.com/YOUR_ORG/code-sentinel.git@main
+        pip install git+https://github.com/corrie2/code-sentinel.git@main
 
     - name: Run Audit
       id: audit

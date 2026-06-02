@@ -35,6 +35,7 @@ class RiskScore:
     score: int
     triggered_rules: List[str] = field(default_factory=list)
     tags: List[str] = field(default_factory=list)
+    rule_details: List[Dict[str, Any]] = field(default_factory=list)
 
     def summary(self) -> str:
         """Human-readable summary of the risk score."""
@@ -48,6 +49,23 @@ class RiskScore:
             for rule in self.triggered_rules:
                 lines.append(f"  - {rule}")
         return "\n".join(lines)
+
+    @property
+    def breakdown_lines(self) -> List[str]:
+        """Formatted breakdown lines showing each rule's contribution.
+
+        Returns strings like '+5 sensitive path (payment/)'.
+        """
+        lines: List[str] = []
+        for detail in self.rule_details:
+            delta = detail.get("score_delta", 0)
+            desc = detail.get("description", "")
+            tag = detail.get("tag", "")
+            line = f"+{delta} {desc}"
+            if tag:
+                line += f" [{tag}]"
+            lines.append(line)
+        return lines
 
 
 def _build_context(
@@ -253,9 +271,21 @@ def assess_risk(
     else:
         level = RiskLevel.HIGH
 
+    # Build rule details with score_delta for breakdown display
+    triggered_set = set(triggered)
+    rule_details: List[Dict[str, Any]] = []
+    for rule in ruleset.rules:
+        if rule.enabled and rule.description in triggered_set:
+            rule_details.append({
+                "description": rule.description,
+                "score_delta": rule.score_delta,
+                "tag": rule.tag,
+            })
+
     return RiskScore(
         level=level,
         score=score,
         triggered_rules=triggered,
         tags=tags,
+        rule_details=rule_details,
     )

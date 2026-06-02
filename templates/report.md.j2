@@ -4,7 +4,13 @@
 
 | | |
 |---|---|
-| **Risk Level** | {{ risk_level | risk_emoji }} {{ risk_level | risk_label }} ({{ risk_score }}/100) |
+| **Risk Score** | {{ risk_score }} points |
+{% if risk_breakdown %}
+| **Breakdown** | |
+{% for item in risk_breakdown %}
+| | {{ item }} |
+{% endfor %}
+{% endif %}
 {% if pr.title %}
 | **PR** | [{{ pr.title }}]({{ pr.url }}) |
 {% endif %}
