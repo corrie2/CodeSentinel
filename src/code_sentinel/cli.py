@@ -667,9 +667,195 @@ async def _run_pipeline(
 
 
 async def cmd_review(args: argparse.Namespace) -> int:
-    """Run the full review pipeline."""
-    config_dict = _load_config()
-    return await _run_pipeline(args, config_dict)
+    """Run the full review pipeline using review()."""
+    from code_sentinel.review import review, ReviewOptions
+
+    options = ReviewOptions(
+        provider=args.provider,
+        rules_path=args.rules,
+        repo_path=args.repo_path,
+        skip_llm=args.skip_llm,
+        memory_db=getattr(args, "memory_db", None),
+    )
+
+    result = await review(args.pr_url, options=options)
+
+    # Get report format
+    fmt = args.format or "markdown"
+    report_key = fmt if fmt in result.reports else "markdown"
+    output_text = result.reports.get(report_key, "")
+
+    # Fallback: render from ReviewResult if reports dict is empty
+    if not output_text:
+        output_text = _render_result(result, fmt)
+
+    # Write to file or stdout
+    output_path = getattr(args, "output", None)
+    if output_path:
+        Path(output_path).write_text(output_text, encoding="utf-8")
+        print(f"Report written to {output_path}", file=sys.stderr)
+    else:
+        print(output_text)
+
+    return 0
+
+
+def _render_result(result: "ReviewResult", fmt: str) -> str:
+    """Render a ReviewResult when result.reports is empty (fallback).
+
+    Converts the ReviewResult into a ReportContext and uses the existing
+    formatter functions to produce output.
+    """
+    from code_sentinel.result import ReviewResult
+    from code_sentinel.reporter.formatter import (
+        PRMetadata,
+        ReportContext,
+        ReviewResults,
+        render_json,
+        render_markdown,
+        render_pr_comment,
+    )
+
+    # Build PRMetadata from ReviewResult
+    pr_meta = PRMetadata(
+        title=result.pr_title,
+        author=result.pr_author,
+        url=result.pr_url,
+        number=0,
+        repo=result.repo,
+    )
+
+    # Build pipeline steps from PipelineTrace
+    class _Step:
+        """Lightweight step wrapper matching the old StepResult interface."""
+        def __init__(self, name, status, message):
+            self.name = name
+            self.status = status
+            self.message = message
+            self.emoji = {
+                "ok": "\u2705", "partial": "\u26a0\ufe0f",
+                "skipped": "\u23ed\ufe0f", "failed": "\u274c",
+            }.get(status, "\u2753")
+
+    pipeline_steps = [
+        _Step(s.name, s.status, s.message)
+        for s in result.pipeline.steps
+    ]
+
+    # Build deep review (ReviewResults) from LLMReviewSummary
+    deep_review = None
+    if result.llm_review.findings:
+        deep_review = ReviewResults(
+            findings=[{
+                "issue_type": f.issue_type,
+                "severity": f.severity,
+                "file": f.file,
+                "line": f.line,
+                "description": f.description,
+                "evidence": f.evidence,
+                "test_suggestion": f.test_suggestion,
+            } for f in result.llm_review.findings],
+            summary=f"Deep review found {len(result.llm_review.findings)} issue(s).",
+            suggestions=[
+                f.test_suggestion
+                for f in result.llm_review.findings
+                if f.test_suggestion
+            ],
+        )
+
+    # Build needs_attention with needs_attention flag
+    needs_attention = []
+    for af in result.attention:
+        needs_attention.append(type("AttentionFileCompat", (), {
+            "path": af.path,
+            "score": af.score,
+            "reasons": af.reasons,
+            "needs_attention": af.score >= 5.0,
+        })())
+
+    # Build supply chain report stub
+    class _SupplyChainStub:
+        def __init__(self, sc):
+            self.total_deps = sc.total_deps
+            self.vulnerable_deps = [
+                type("Vuln", (), {
+                    "package": v.package,
+                    "version": "",
+                    "ecosystem": "",
+                    "vuln_id": v.id,
+                    "summary": v.summary,
+                    "display_severity": v.severity,
+                    "fixed_version": v.fixed_version,
+                })()
+                for v in sc.vulnerabilities
+            ]
+            self.deprecated_deps = []
+            self.license_issues = []
+            self.errors = [sc.error] if sc.error else []
+
+    # Build impact report stub
+    class _ImpactStub:
+        def __init__(self, imp):
+            self.total_files_changed = 0
+            self.files_added = 0
+            self.files_modified = 0
+            self.files_deleted = 0
+            self.estimated_build_seconds = imp.estimated_build_seconds
+            self.build_risk = imp.build_risk
+            self.test_files_changed = 0
+            self.estimated_new_tests_needed = 0
+            self.test_coverage_risk = imp.test_coverage_risk
+            self.affected_modules = [
+                type("Module", (), {"module": m, "files_changed": 0,
+                                     "change_types": [], "severity": "low"})()
+                for m in imp.affected_modules
+            ]
+            self.warnings = []
+            self.config_changes = []
+            self.ci_changes = []
+            self.dependency_changes = []
+
+    ctx = ReportContext(
+        pr=pr_meta,
+        risk_score=result.risk.score,
+        risk_level=result.risk.level,
+        risk_details={},
+        risk_breakdown=[],
+        total_deps=result.dependencies.manifest_count,
+        vulnerable_deps=[],
+        deprecated_deps=[],
+        license_issues=[],
+        estimated_build_seconds=result.impact.estimated_build_seconds,
+        build_risk=result.impact.build_risk,
+        test_coverage_risk=result.impact.test_coverage_risk,
+        affected_modules=[
+            {"module": m, "files_changed": 0, "change_types": [], "severity": "low"}
+            for m in result.impact.affected_modules
+        ],
+        deep_review=deep_review,
+        needs_attention=needs_attention,
+        pipeline_steps=pipeline_steps,
+        codesentinel_modified=result.metadata.codesentinel_modified,
+    )
+
+    # Map supply chain vulnerabilities
+    for v in result.supply_chain.vulnerabilities:
+        ctx.vulnerable_deps.append({
+            "package": v.package,
+            "version": "",
+            "ecosystem": "",
+            "vuln_id": v.id,
+            "summary": v.summary,
+            "severity": v.severity,
+            "fixed_version": v.fixed_version,
+        })
+
+    if fmt == "json":
+        return render_json(ctx)
+    elif fmt == "pr-comment":
+        return render_pr_comment(ctx)
+    else:
+        return render_markdown(ctx)
 
 
 def cmd_config_show(args: argparse.Namespace) -> int:

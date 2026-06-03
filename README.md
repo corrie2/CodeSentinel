@@ -212,6 +212,187 @@ rules/                   # Default risk rules
 templates/               # Report templates
 ```
 
+## Python API
+
+CodeSentinel can be used as a Python library — no CLI required.
+
+### Async (recommended)
+
+```python
+import asyncio
+from code_sentinel import review, ReviewOptions
+
+async def main():
+    result = await review(
+        "https://github.com/owner/repo/pull/123",
+        options=ReviewOptions(provider="mimo"),
+    )
+    print(f"Risk: {result.risk.level} ({result.risk.score} points)")
+    print(f"Findings: {len(result.llm_review.findings)}")
+    print(result.reports.get("markdown", ""))
+
+asyncio.run(main())
+```
+
+### Synchronous
+
+```python
+from code_sentinel import review_sync, ReviewOptions
+
+result = review_sync(
+    "https://github.com/owner/repo/pull/123",
+    options=ReviewOptions(skip_llm=True),
+)
+print(result.summary)
+```
+
+### ReviewOptions
+
+All fields are optional — anything left as `None` is resolved from config file and environment variables.
+
+```python
+ReviewOptions(
+    provider="mimo",          # LLM provider (mimo, deepseek)
+    model="mimo-v2.5-pro",   # Model name
+    api_key="...",            # LLM API key
+    github_token="...",       # GitHub API token
+    rules_path="rules.toml", # Custom rules file
+    repo_path=".",            # Local repo path (enables git history)
+    skip_llm=False,           # Skip LLM deep review
+    timeout_seconds=120,      # Pipeline timeout
+    strict=False,             # Raise on any pipeline error
+    auditors=[],              # Custom auditor plugins
+    reporters=[],             # Custom reporter plugins
+)
+```
+
+### ReviewResult
+
+```python
+result.risk.level              # "low" / "medium" / "high"
+result.risk.score              # int
+result.risk.contributions      # list[RiskContribution]
+result.llm_review.findings     # list[Finding]
+result.dependencies            # DependencySummary
+result.supply_chain            # SupplyChainSummary
+result.impact                  # ImpactSummary
+result.attention               # list[AttentionFile]
+result.pipeline.steps          # list[PipelineStep]
+result.reports                 # dict[str, str] (markdown, json, pr-comment)
+result.summary                 # one-line human-readable string
+result.is_high_risk            # bool
+result.has_findings            # bool
+result.to_dict()               # serialize to plain dict
+```
+
+## Plugins
+
+CodeSentinel has a plugin system for auditors and reporters.
+
+### AuditorPlugin
+
+Add custom analysis steps to the pipeline. Subclass `AuditorPlugin` and implement `audit()`:
+
+```python
+from code_sentinel.plugins import AuditorPlugin, AuditContext, AuditResult
+
+class MyAuditor(AuditorPlugin):
+    name = "my_auditor"
+
+    async def audit(self, context: AuditContext) -> AuditResult:
+        result = AuditResult(name=self.name)
+        # Access: context.changeset, context.raw_diff, context.dep_changes, ...
+        result.status = "ok"
+        result.findings.append({"type": "custom", "severity": "medium", "message": "..."})
+        return result
+```
+
+Pass it via `ReviewOptions(auditors=[MyAuditor()])`.
+
+### ReporterPlugin
+
+Add custom output formats. Subclass `ReporterPlugin` and implement `render()`:
+
+```python
+from code_sentinel.plugins import ReporterPlugin
+from code_sentinel.result import ReviewResult
+
+class SlackReporter(ReporterPlugin):
+    name = "slack"
+
+    def render(self, result: ReviewResult) -> str:
+        return f"Risk: {result.risk.level} ({result.risk.score})"
+```
+
+Pass it via `ReviewOptions(reporters=[SlackReporter()])`. The rendered output is available in `result.reports["slack"]`.
+
+### Built-in Plugins
+
+| Plugin | Type | Name | Description |
+|--------|------|------|-------------|
+| `MarkdownReporter` | Reporter | `markdown` | Full Markdown report |
+| `JsonReporter` | Reporter | `json` | JSON serialization |
+| `PrCommentReporter` | Reporter | `pr-comment` | GitHub PR comment format |
+| `SupplyChainAuditor` | Auditor | `supply_chain` | OSV vulnerability scan |
+| `ImpactAuditor` | Auditor | `impact` | Build/test impact assessment |
+| `DeepReviewAuditor` | Auditor | `deep_review` | LLM deep review (high-risk only) |
+
+## Examples
+
+See the `examples/` directory:
+
+| File | Description |
+|------|-------------|
+| `examples/basic.py` | Async review with one line |
+| `examples/basic_sync.py` | Synchronous usage |
+| `examples/custom_rules.py` | Project-specific rules.toml |
+| `examples/custom_reporter.py` | Custom Slack reporter plugin |
+| `examples/ci_pipeline.py` | CI/CD integration with exit codes |
+
+Run any example:
+
+```bash
+python examples/basic.py
+```
+
+## Harness Architecture
+
+CodeSentinel uses a three-level funnel with a plugin harness:
+
+```
+PR URL
+  │
+  ├─ Collect PR Data (GitHub API)
+  ├─ Parse Diff → ChangeSet
+  ├─ Dependency Scan (3-layer: detect → patch → full diff)
+  ├─ Load Project Context (.codesentinel/)
+  │
+  ├─ Level 1: Risk Scoring (deterministic rules)
+  │   └─ 19 built-in rules + custom rules.toml
+  │
+  ├─ Level 2: Auditors (plugin harness)
+  │   ├─ SupplyChainAuditor → OSV vulnerabilities
+  │   ├─ ImpactAuditor → build/test impact
+  │   └─ [Custom AuditorPlugins]
+  │
+  ├─ Level 3: LLM Deep Review (high-risk only)
+  │   └─ risk-aware file selection → findings + test skeletons
+  │
+  ├─ Reporters (plugin harness)
+  │   ├─ MarkdownReporter
+  │   ├─ JsonReporter
+  │   ├─ PrCommentReporter
+  │   └─ [Custom ReporterPlugins]
+  │
+  └─ ReviewResult (unified output)
+```
+
+The harness pattern:
+
+1. **AuditorPlugin.audit(context) → AuditResult** — each auditor gets an `AuditContext` with all PR data and returns an `AuditResult` with findings/warnings.
+2. **ReporterPlugin.render(result) → str** — each reporter converts a `ReviewResult` into a formatted string.
+3. **Pipeline orchestrator** runs auditors in order, collects results, then runs reporters. Partial failures are tolerated unless `strict=True`.
+
 ## License
 
 MIT
