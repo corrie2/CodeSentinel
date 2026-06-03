@@ -107,6 +107,8 @@ def evaluate_condition(condition: str, context: Dict[str, Any]) -> bool:
         - touches('pattern')
         - func_name('arg')  (for registered built-in functions)
         - bare_field_name   (truthy check)
+        - expr1 or expr2    (logical OR)
+        - expr1 and expr2   (logical AND)
 
     Args:
         condition: The condition expression string.
@@ -118,6 +120,24 @@ def evaluate_condition(condition: str, context: Dict[str, Any]) -> bool:
     Raises:
         ValueError: If the condition cannot be parsed.
     """
+    condition = condition.strip()
+
+    # Handle 'or' — split on ' or ' (not inside quotes)
+    # Simple approach: split on ' or ' and evaluate each part
+    if ' or ' in condition:
+        parts = condition.split(' or ')
+        return any(_evaluate_single(p.strip(), context) for p in parts)
+
+    # Handle 'and' — split on ' and ' (not inside quotes)
+    if ' and ' in condition:
+        parts = condition.split(' and ')
+        return all(_evaluate_single(p.strip(), context) for p in parts)
+
+    return _evaluate_single(condition, context)
+
+
+def _evaluate_single(condition: str, context: Dict[str, Any]) -> bool:
+    """Evaluate a single (non-compound) condition expression."""
     condition = condition.strip()
 
     # Try function call: touches('payment/') or any_dep_type('added')

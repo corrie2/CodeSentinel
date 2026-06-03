@@ -289,7 +289,7 @@ async def run_deep_review(
         )
     except Exception as exc:
         logger.error("Deep review LLM call failed: %s", exc)
-        return []
+        raise  # Let caller handle and report as failed
     finally:
         await client.close()
 

@@ -56,6 +56,7 @@ runs:
         FORMAT="${{ inputs.format }}"
         SKIP_LLM="${{ inputs.skip_llm }}"
         RULES="${{ inputs.rules }}"
+        PROVIDER="${{ inputs.llm_provider }}"
 
         ARGS="review $PR_URL --format $FORMAT"
         if [ "$SKIP_LLM" = "true" ]; then
@@ -64,10 +65,13 @@ runs:
         if [ -n "$RULES" ]; then
           ARGS="$ARGS --rules $RULES"
         fi
+        if [ -n "$PROVIDER" ]; then
+          ARGS="$ARGS --provider $PROVIDER"
+        fi
 
         codesentinel $ARGS --output report.md
 
         # Extract risk level for output
-        RISK=$(grep -oP '(?<=Risk Level: \*\*)\w+' report.md || echo "unknown")
+        RISK=$(grep -oiP '(Low|Medium|High) Risk' report.md | head -1 | awk '{print tolower($1)}' || echo "unknown")
         echo "risk_level=$RISK" >> "$GITHUB_OUTPUT"
         echo "report_path=report.md" >> "$GITHUB_OUTPUT"

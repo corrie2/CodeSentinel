@@ -207,9 +207,10 @@ async def _run_pipeline(
     from code_sentinel.risk.scorer import RiskLevel, assess_risk
 
     # Build Config object for providers
+    _provider = args.provider or config_dict.get("provider", "mimo")
     config_obj = Config(
-        provider=config_dict.get("provider", "mimo"),
-        api_key=config_dict.get("mimo_api_key") or config_dict.get("api_key"),
+        provider=_provider,
+        api_key=config_dict.get(f"{_provider}_api_key") or config_dict.get("api_key"),
         github_token=config_dict.get("github_token"),
     )
 
@@ -428,6 +429,33 @@ async def _run_pipeline(
     # ── Step 7: Risk scoring ─────────────────────────────────────
     print("  [4/6] Computing risk score...", file=sys.stderr)
     rules_path = args.rules or config_dict.get("rules_file") or None
+
+    # Auto-load .codesentinel/rules.toml from base branch if not explicitly set
+    if not rules_path and base_sha and owner and repo:
+        try:
+            from code_sentinel.git_provider.github import GitHubProvider
+            async with GitHubProvider(config_obj) as gh_rules:
+                rules_content = await gh_rules.get_file_content(
+                    owner, repo, ".codesentinel/rules.toml", ref=base_sha
+                )
+                if rules_content:
+                    # Write to temp file for load_rules to read
+                    import tempfile
+                    tmp = tempfile.NamedTemporaryFile(
+                        mode="w", suffix=".toml", delete=False
+                    )
+                    tmp.write(rules_content)
+                    tmp.close()
+                    rules_path = tmp.name
+                    print(f"         Loaded .codesentinel/rules.toml from base branch", file=sys.stderr)
+                    steps.append(StepResult(
+                        name="Project Rules",
+                        status="ok",
+                        message="Loaded .codesentinel/rules.toml from base branch",
+                    ))
+        except Exception:
+            pass  # No .codesentinel/rules.toml in repo, use defaults
+
     # Load rules once — used for risk scoring AND critical_paths for file ranker
     from code_sentinel.risk.scorer import load_rules
     loaded_ruleset = load_rules(rules_path)
@@ -1177,6 +1205,12 @@ def build_parser() -> argparse.ArgumentParser:
         "-o",
         default=None,
         help="Write report to file instead of stdout",
+    )
+    review_parser.add_argument(
+        "--provider",
+        default=None,
+        choices=["mimo", "deepseek", "openai"],
+        help="LLM provider (default: from config or mimo)",
     )
 
     # Config command
