@@ -429,7 +429,7 @@ async def _run_pipeline(
     print("  [4/6] Computing risk score...", file=sys.stderr)
     rules_path = args.rules or config_dict.get("rules_file") or None
     # Load rules once — used for risk scoring AND critical_paths for file ranker
-    from code_sentinel.risk.rules import load_rules
+    from code_sentinel.risk.scorer import load_rules
     loaded_ruleset = load_rules(rules_path)
     risk_score = assess_risk(
         changeset=changeset,
@@ -485,7 +485,7 @@ async def _run_pipeline(
         )
         # Track supply chain audit result
         _vuln_count = len(getattr(supply_chain_report, 'vulnerable_deps', []))
-        _query_failed = getattr(supply_chain_report, 'query_failed_count', 0)
+        _query_failed = len(getattr(supply_chain_report, 'errors', []))
         if _query_failed > 0:
             steps.append(StepResult("OSV Audit", "partial",
                                     f"OSV query failed for {_query_failed} packages"))
@@ -512,6 +512,7 @@ async def _run_pipeline(
                         raw_diff=raw_diff,
                         module_densities=module_densities or None,
                         project_context=project_context or None,
+                        critical_paths=getattr(loaded_ruleset, 'critical_paths', None),
                     )
                     if findings:
                         deep_review_findings = ReviewResults(
@@ -574,7 +575,8 @@ async def _run_pipeline(
         needs_attention = get_top_files(changeset, n=10, risk_context=risk_ctx)
 
     # ── Build report ─────────────────────────────────────────────
-    pr_meta = PRMetadata(**pr_data.get("pr", {}))
+    _pr_valid_keys = set(PRMetadata.__dataclass_fields__)
+    pr_meta = PRMetadata(**{k: v for k, v in pr_data.get("pr", {}).items() if k in _pr_valid_keys})
     ctx = build_report_context(
         pr=pr_meta,
         risk_score=risk_score.score,
@@ -801,13 +803,14 @@ def _build_rules_toml(ecosystem: str | None, critical_paths: list[str] | None) -
         # Hardcoded fallback
         content = _HARDCODED_DEFAULT_RULES
 
-    # Append project.critical_paths section
+    # Append project.critical_paths section (dict format matching load_rules_from_toml)
     content += "\n# ---- Project-Specific Critical Paths (customise these) ----\n\n[project]\ncritical_paths = [\n"
     if critical_paths:
         for p in critical_paths:
-            content += f'    "{p}",\n'
+            escaped = p.replace("\\", "\\\\").replace('"', '\\"')
+            content += f'    {{path = "{escaped}", weight = 30, reason = "Project source"}},\n'
     else:
-        content += '    "src/",\n'
+        content += '    {path = "src/", weight = 30, reason = "Project source"},\n'
     content += "]\n"
 
     # Append ecosystem-specific rules

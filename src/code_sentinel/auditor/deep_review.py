@@ -213,6 +213,7 @@ async def run_deep_review(
     raw_diff: str = "",
     module_densities: Optional[Dict[str, float]] = None,
     project_context: Optional[str] = None,
+    critical_paths: Optional[List[Dict[str, Any]]] = None,
 ) -> List[DeepFinding]:
     """Perform an LLM-powered deep code review of high-risk files.
 
@@ -227,6 +228,7 @@ async def run_deep_review(
         module_densities: Module defect densities from project memory.
         project_context: Optional project profile and review policy context
             from .codesentinel/ config files (already sanitized).
+        critical_paths: List of critical path dicts from the ruleset.
 
     Returns:
         A list of :class:`DeepFinding` objects.
@@ -243,7 +245,7 @@ async def run_deep_review(
     )
     risk_ctx = {
         "high_defect_modules": _high_defect,
-        "critical_paths": [],
+        "critical_paths": critical_paths or [],
     }
     ranked_files = get_top_files(
         changeset, n=_MAX_HIGH_RISK_FILES, risk_context=risk_ctx

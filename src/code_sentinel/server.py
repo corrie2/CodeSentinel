@@ -316,7 +316,7 @@ async def _run_github_audit(owner: str, repo: str, number: int) -> None:
     """
     try:
         from code_sentinel.git_provider.github import GitHubProvider
-        from code_sentinel.cli import _collect_pr_data, _compute_risk_score
+        from code_sentinel.cli import _collect_pr_data, _run_pipeline
 
         config_obj = _app_state.get("config")
         if config_obj is None:

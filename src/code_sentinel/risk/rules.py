@@ -51,12 +51,18 @@ def _fn_any_dep_type(context: Dict[str, Any], dep_type: str) -> bool:
     """Check if there are dependency changes of the given type."""
     dep_changes = context.get("_dep_changes", [])
     for dc in dep_changes:
-        if dep_type == "added" and dc.added:
-            return True
-        if dep_type == "removed" and dc.removed:
-            return True
-        if dep_type == "upgraded" and dc.upgraded:
-            return True
+        if hasattr(dc, 'change_type'):
+            # New DepChange format
+            if dc.change_type == dep_type:
+                return True
+        else:
+            # Old DependencyChange format
+            if dep_type == 'added' and dc.added:
+                return True
+            if dep_type == 'removed' and dc.removed:
+                return True
+            if dep_type in ('upgraded', 'version_changed') and dc.upgraded:
+                return True
     return False
 
 
