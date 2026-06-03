@@ -5,6 +5,7 @@
 | | |
 |---|---|
 | **Risk Score** | {{ risk_score }} points |
+| **Risk Level** | {{ risk_level | risk_emoji }} {{ risk_level | risk_label }} |
 {% if risk_breakdown %}
 | **Breakdown** | |
 {% for item in risk_breakdown %}

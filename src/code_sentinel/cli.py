@@ -250,6 +250,7 @@ async def _run_pipeline(
             scan_diff_for_dep_files,
             parse_dep_changes_from_patch,
             compute_dep_diff,
+            detect_ecosystem,
         )
 
         dep_filenames = scan_diff_for_dep_files(changeset.files)
@@ -302,8 +303,12 @@ async def _run_pipeline(
                                 new_content = await gh_layer3.get_file_content(owner, repo, dep_file, ref=head_sha)
                                 if old_content or new_content:
                                     layer3_changes = compute_dep_diff(dep_file, old_content, new_content)
-                                    # Replace low-confidence entries for this file's ecosystem
-                                    dep_changes = [c for c in dep_changes if c.confidence != "low"]
+                                    # Only replace low-confidence entries for THIS file's ecosystem
+                                    _ecosystem = detect_ecosystem(dep_file)
+                                    dep_changes = [
+                                        c for c in dep_changes
+                                        if not (c.confidence == "low" and c.ecosystem == _ecosystem)
+                                    ]
                                     dep_changes.extend(layer3_changes)
                             except Exception as exc:
                                 logger.warning("Layer 3 dep scan failed for %s: %s", dep_file, exc)
@@ -430,31 +435,47 @@ async def _run_pipeline(
     print("  [4/6] Computing risk score...", file=sys.stderr)
     rules_path = args.rules or config_dict.get("rules_file") or None
 
-    # Auto-load .codesentinel/rules.toml from base branch if not explicitly set
-    if not rules_path and base_sha and owner and repo:
-        try:
-            from code_sentinel.git_provider.github import GitHubProvider
-            async with GitHubProvider(config_obj) as gh_rules:
-                rules_content = await gh_rules.get_file_content(
-                    owner, repo, ".codesentinel/rules.toml", ref=base_sha
-                )
-                if rules_content:
-                    # Write to temp file for load_rules to read
-                    import tempfile
-                    tmp = tempfile.NamedTemporaryFile(
-                        mode="w", suffix=".toml", delete=False
+    # Auto-load .codesentinel/rules.toml if not explicitly set
+    if not rules_path:
+        _rules_loaded = False
+        # Try GitHub API with base branch
+        if base_sha and owner and repo:
+            try:
+                from code_sentinel.git_provider.github import GitHubProvider
+                async with GitHubProvider(config_obj) as gh_rules:
+                    rules_content = await gh_rules.get_file_content(
+                        owner, repo, ".codesentinel/rules.toml", ref=base_sha
                     )
-                    tmp.write(rules_content)
-                    tmp.close()
-                    rules_path = tmp.name
-                    print(f"         Loaded .codesentinel/rules.toml from base branch", file=sys.stderr)
-                    steps.append(StepResult(
-                        name="Project Rules",
-                        status="ok",
-                        message="Loaded .codesentinel/rules.toml from base branch",
-                    ))
-        except Exception:
-            pass  # No .codesentinel/rules.toml in repo, use defaults
+                    if rules_content:
+                        import tempfile
+                        tmp = tempfile.NamedTemporaryFile(
+                            mode="w", suffix=".toml", delete=False
+                        )
+                        tmp.write(rules_content)
+                        tmp.close()
+                        rules_path = tmp.name
+                        _rules_loaded = True
+                        print(f"         Loaded .codesentinel/rules.toml from base branch", file=sys.stderr)
+                        steps.append(StepResult(
+                            name="Project Rules",
+                            status="ok",
+                            message="Loaded .codesentinel/rules.toml from base branch",
+                        ))
+            except Exception:
+                pass
+
+        # Fallback: try local file if API failed or base_sha unavailable
+        if not _rules_loaded and args.repo_path:
+            local_rules = Path(args.repo_path).resolve() / ".codesentinel" / "rules.toml"
+            if local_rules.exists():
+                rules_path = str(local_rules)
+                _rules_loaded = True
+                print(f"         Loaded .codesentinel/rules.toml from local repo", file=sys.stderr)
+                steps.append(StepResult(
+                    name="Project Rules",
+                    status="ok",
+                    message="Loaded .codesentinel/rules.toml from local repo",
+                ))
 
     # Load rules once — used for risk scoring AND critical_paths for file ranker
     from code_sentinel.risk.scorer import load_rules
