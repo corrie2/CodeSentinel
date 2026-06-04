@@ -335,6 +335,7 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
     """
     try:
         from code_sentinel.review import review, ReviewOptions
+        from code_sentinel.reporter.formatter import render_pr_comment, build_report_context, PRMetadata, ReviewResults
 
         cfg = _app_state.get("config")
         if provider_type == "gitlab":
@@ -357,7 +358,54 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
             len(result.llm_review.findings),
         )
 
-        # TODO: Post results back as a PR/MR comment
+        # Post results back as a PR/MR comment
+        comment_body = result.reports.get("pr_comment", "")
+        if not comment_body:
+            # Fallback: generate from result if reporter didn't run
+            try:
+                pr_meta = PRMetadata(
+                    url=result.pr_url,
+                    title=result.pr_title,
+                    author=result.pr_author,
+                    repo=result.repo,
+                    number=number,
+                    base_branch=result.base_branch,
+                    head_branch=result.head_branch,
+                )
+                review_results = ReviewResults(
+                    risk_level=result.risk.level,
+                    risk_score=result.risk.score,
+                    risk_details=result.risk.contributions,
+                    deep_review=result.llm_review,
+                    needs_attention=result.needs_attention,
+                    recommendations=result.recommendations,
+                )
+                ctx = build_report_context(pr_meta, review_results)
+                comment_body = render_pr_comment(ctx)
+            except Exception as exc:
+                logger.warning("Failed to render PR comment: %s", exc)
+                comment_body = f"## CodeSentinel Review\n\nRisk Level: {result.risk.level} ({result.risk.score} points)\n\n{len(result.llm_review.findings)} findings detected."
+
+        if comment_body:
+            try:
+                from code_sentinel.git_provider.github import GitHubProvider
+                from code_sentinel.git_provider.gitlab import GitLabProvider
+
+                if provider_type == "gitlab":
+                    provider = GitLabProvider(cfg)
+                else:
+                    provider = GitHubProvider(cfg)
+
+                async with provider:
+                    prov_owner = f"{owner}/{repo}" if provider_type == "gitlab" else owner
+                    prov_repo = "" if provider_type == "gitlab" else repo
+                    posted = await provider.post_comment(prov_owner, prov_repo, number, comment_body)
+                    if posted:
+                        logger.info("Posted review comment on %s/%s#%d", owner, repo, number)
+                    else:
+                        logger.warning("Failed to post review comment on %s/%s#%d", owner, repo, number)
+            except Exception as exc:
+                logger.error("Error posting comment on %s/%s#%d: %s", owner, repo, number, exc)
 
     except Exception:
         logger.exception("Error in %s audit for %s/%s#%d", provider_type, owner, repo, number)

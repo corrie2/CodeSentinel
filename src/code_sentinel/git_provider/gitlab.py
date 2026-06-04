@@ -489,6 +489,110 @@ class GitLabProvider(BaseGitProvider):
         logger.warning("Rate limited by GitLab. Waiting %ds (attempt %d)", wait, attempt)
         await asyncio.sleep(wait)
 
+    async def get_file_content(
+        self, owner: str, repo: str, path: str, ref: str = "main"
+    ) -> str:
+        """Get raw file content from GitLab at a specific ref.
+
+        Uses GET /projects/:id/repository/files/:file_path/raw.
+        Returns an empty string if the file does not exist (404).
+        """
+        project_id = await self._resolve_project_id(owner, repo)
+        encoded_path = urllib.parse.quote(path, safe="")
+        client = await self._get_client()
+        url = f"/projects/{project_id}/repository/files/{encoded_path}/raw"
+        params = {"ref": ref}
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                resp = await client.get(url, params=params)
+
+                if resp.status_code == 404:
+                    return ""
+
+                if resp.status_code == 429:
+                    wait = 2 ** attempt
+                    logger.warning("Rate limited by GitLab. Waiting %ds (attempt %d)", wait, attempt)
+                    await asyncio.sleep(wait)
+                    continue
+
+                resp.raise_for_status()
+                return resp.text
+
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code == 404:
+                    return ""
+                status = exc.response.status_code
+                if status in (429, 500, 502, 503):
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "GitLab GET %s attempt %d/%d got %d, retrying in %ds",
+                        url, attempt, self._max_retries, status, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise ProviderError(
+                    f"GitLab API error ({status}) on GET {url}: {exc.response.text}",
+                    status_code=status,
+                ) from exc
+
+            except httpx.RequestError as exc:
+                if attempt < self._max_retries:
+                    wait = 2 ** attempt
+                    logger.warning(
+                        "GitLab GET %s attempt %d/%d network error, retrying in %ds",
+                        url, attempt, self._max_retries, wait,
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise ProviderError(
+                    f"Network error on GET {url}: {exc}"
+                ) from exc
+
+        return ""
+
+    async def post_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> bool:
+        """Post a note on a GitLab merge request.
+
+        Uses POST /projects/{id}/merge_requests/{mr_iid}/notes.
+        """
+        project_id = await self._resolve_project_id(owner, repo)
+        client = await self._get_client()
+        url = f"/projects/{project_id}/merge_requests/{number}/notes"
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                resp = await client.post(url, json={"body": body})
+                if resp.status_code == 429:
+                    wait = 2 ** attempt
+                    logger.warning("Rate limited by GitLab. Waiting %ds (attempt %d)", wait, attempt)
+                    await asyncio.sleep(wait)
+                    continue
+                resp.raise_for_status()
+                logger.info("Posted note on %s/%s#%d", owner, repo, number)
+                return True
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (429, 500, 502, 503):
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.error(
+                    "Failed to post note on %s/%s#%d: %s",
+                    owner, repo, number, exc,
+                )
+                return False
+            except httpx.RequestError as exc:
+                if attempt < self._max_retries:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.error(
+                    "Failed to post note on %s/%s#%d: %s",
+                    owner, repo, number, exc,
+                )
+                return False
+        return False
+
 
 def _count_diff_lines(diff_text: str) -> tuple[int, int]:
     """Count addition and deletion lines from a unified diff hunk.

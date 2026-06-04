@@ -172,6 +172,8 @@ class ReviewResult:
     pr_title: str = ""
     pr_author: str = ""
     repo: str = ""
+    base_branch: str = ""
+    head_branch: str = ""
 
     risk: RiskSummary = field(
         default_factory=lambda: RiskSummary(level="low", score=0)

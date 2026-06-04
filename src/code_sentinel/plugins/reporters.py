@@ -42,6 +42,8 @@ def _review_result_to_context(result: ReviewResult) -> ReportContext:
         url=result.pr_url,
         number=_extract_pr_number(result.pr_url),
         repo=result.repo,
+        base_branch=result.base_branch,
+        head_branch=result.head_branch,
     )
 
     # Risk breakdown from contributions

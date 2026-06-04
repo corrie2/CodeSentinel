@@ -317,6 +317,8 @@ async def _collect_pr_data(
             "repo": f"{owner}/{repo}" if repo else owner,
             "base_sha": "",
             "head_sha": "",
+            "base_branch": "",
+            "head_branch": "",
         },
         "diff": "",
         "changed_files": [],
@@ -333,6 +335,8 @@ async def _collect_pr_data(
             result["pr"]["author"] = pr_info.author
             result["pr"]["base_sha"] = pr_info.base_sha
             result["pr"]["head_sha"] = pr_info.head_sha
+            result["pr"]["base_branch"] = pr_info.base_branch
+            result["pr"]["head_branch"] = pr_info.head_branch
 
             if provider_type == "gitlab":
                 result["diff"] = await provider.get_diff(project_path, "", pr_number)
@@ -420,6 +424,8 @@ async def _run_pipeline_internal(
         result.pr_title = pr_data.get("pr", {}).get("title", "")
         result.pr_author = pr_data.get("pr", {}).get("author", "")
         result.repo = f"{owner}/{repo}"
+        result.base_branch = pr_data.get("pr", {}).get("base_branch", "")
+        result.head_branch = pr_data.get("pr", {}).get("head_branch", "")
         _record(trace, "PR Data", "ok", "PR data collected")
     except RuntimeError:
         raise
@@ -723,7 +729,7 @@ async def _run_pipeline_internal(
             score=risk_score.score,
             contributions=contributions,
         )
-        result.metadata.project_rules_loaded = True
+        result.metadata.project_rules_loaded = project_rules_loaded
 
         _record(
             trace, "Risk Scoring", "ok",

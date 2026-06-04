@@ -162,6 +162,7 @@ class BaseGitProvider(ABC):
         """
         ...
 
+    @abstractmethod
     async def get_file_content(
         self, owner: str, repo: str, path: str, ref: str = "main"
     ) -> str:
@@ -182,6 +183,30 @@ class BaseGitProvider(ABC):
         -------
         str
             The raw file content, or an empty string if the file does not exist.
+        """
+        ...
+
+    @abstractmethod
+    async def post_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> bool:
+        """Post a comment on a pull request / merge request.
+
+        Parameters
+        ----------
+        owner : str
+            Repository owner (user or organisation).
+        repo : str
+            Repository name.
+        number : int
+            Pull-request / merge-request number.
+        body : str
+            Comment body (Markdown).
+
+        Returns
+        -------
+        bool
+            True if the comment was posted successfully.
         """
         raise NotImplementedError
 

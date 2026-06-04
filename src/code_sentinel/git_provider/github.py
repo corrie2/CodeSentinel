@@ -327,3 +327,42 @@ class GitHubProvider(BaseGitProvider):
         wait = min(wait, 120)  # cap at 2 minutes
         logger.warning("Rate limited by GitHub. Waiting %ds (attempt %d)", wait, attempt)
         await asyncio.sleep(wait)
+
+    async def post_comment(
+        self, owner: str, repo: str, number: int, body: str
+    ) -> bool:
+        """Post a comment on a GitHub pull request.
+
+        Uses POST /repos/{owner}/{repo}/issues/{number}/comments.
+        """
+        client = await self._get_client()
+        url = f"/repos/{owner}/{repo}/issues/{number}/comments"
+
+        for attempt in range(1, self._max_retries + 1):
+            try:
+                resp = await client.post(url, json={"body": body})
+                if resp.status_code == 403 and self._is_rate_limited(resp):
+                    await self._wait_rate_limit(resp, attempt)
+                    continue
+                resp.raise_for_status()
+                logger.info("Posted comment on %s/%s#%d", owner, repo, number)
+                return True
+            except httpx.HTTPStatusError as exc:
+                if exc.response.status_code in (429, 500, 502, 503):
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.error(
+                    "Failed to post comment on %s/%s#%d: %s",
+                    owner, repo, number, exc,
+                )
+                return False
+            except httpx.RequestError as exc:
+                if attempt < self._max_retries:
+                    await asyncio.sleep(2 ** attempt)
+                    continue
+                logger.error(
+                    "Failed to post comment on %s/%s#%d: %s",
+                    owner, repo, number, exc,
+                )
+                return False
+        return False
