@@ -368,6 +368,15 @@ codesentinel serve --port 8080
 # GitLab webhook: POST /webhook/gitlab
 ```
 
+The webhook server runs the full pipeline:
+1. Receives PR/MR events from GitHub or GitLab
+2. Runs risk scoring, dependency audit, and LLM deep review
+3. **Posts review results back as a PR/MR comment**
+
+For the comment to be posted, the token needs write access:
+- GitHub: `GITHUB_TOKEN` with `issues:write` permission
+- GitLab: `GITLAB_TOKEN` with `api` scope
+
 ## Configuration
 
 Environment variables (priority: `CODESENTINEL_` prefix > no prefix):

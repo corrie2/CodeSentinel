@@ -368,6 +368,15 @@ codesentinel serve --port 8080
 # GitLab webhook: POST /webhook/gitlab
 ```
 
+Webhook 服务执行完整流水线：
+1. 接收来自 GitHub 或 GitLab 的 PR/MR 事件
+2. 运行风险评分、依赖审计和 LLM 深度审查
+3. **将审查结果回写为 PR/MR 评论**
+
+要回写评论，Token 需要写权限：
+- GitHub: `GITHUB_TOKEN` 需要 `issues:write` 权限
+- GitLab: `GITLAB_TOKEN` 需要 `api` scope
+
 ## 配置
 
 环境变量（优先级：`CODESENTINEL_` 前缀 > 无前缀）：
