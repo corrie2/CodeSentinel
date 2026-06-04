@@ -86,8 +86,7 @@ class SupplyChainAuditor(AuditorPlugin):
 
             if report.errors:
                 result.warnings.extend(report.errors)
-                if not report.vulnerable_deps:
-                    result.status = "partial"
+                result.status = "partial"
 
         except Exception as exc:
             logger.error("Supply chain audit failed: %s", exc)
@@ -200,17 +199,11 @@ class DeepReviewAuditor(AuditorPlugin):
         result = AuditResult(name=self.name)
 
         # Only run for high risk
-        # Check if risk level is available in the context
         risk_level = "low"
-        if context.options and hasattr(context.options, "risk_level"):
+        if context.risk_summary and hasattr(context.risk_summary, "level"):
+            risk_level = context.risk_summary.level
+        elif context.options and hasattr(context.options, "risk_level"):
             risk_level = context.options.risk_level
-        # Also check step_results for risk info
-        for step in context.step_results:
-            if hasattr(step, "name") and step.name == "Risk Scoring":
-                if hasattr(step, "message") and "HIGH" in step.message.upper():
-                    risk_level = "high"
-                elif hasattr(step, "details") and step.details.get("level") == "high":
-                    risk_level = "high"
 
         if risk_level != "high":
             result.status = "skipped"

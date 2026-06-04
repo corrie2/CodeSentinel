@@ -347,6 +347,7 @@ See the `examples/` directory:
 | `examples/basic_sync.py` | Synchronous usage |
 | `examples/custom_rules.py` | Project-specific rules.toml |
 | `examples/custom_reporter.py` | Custom Slack reporter plugin |
+| `examples/custom_auditor.py` | Custom SQL injection & credential auditor |
 | `examples/ci_pipeline.py` | CI/CD integration with exit codes |
 
 Run any example:

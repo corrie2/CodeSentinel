@@ -36,6 +36,7 @@ class AuditContext:
     dep_changes: list = field(default_factory=list)
     github_token: str | None = None
     llm_config: dict | None = None
+    risk_summary: Any = None  # RiskSummary (risk level + score)
     options: Any = None  # ReviewOptions
     step_results: list = field(default_factory=list)  # collected StepResults
 

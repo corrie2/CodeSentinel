@@ -185,6 +185,7 @@ class ReviewResult:
     attention: list[AttentionFile] = field(default_factory=list)
     pipeline: PipelineTrace = field(default_factory=PipelineTrace)
     reports: dict[str, str] = field(default_factory=dict)
+    agent_results: list = field(default_factory=list)  # list[AuditResult]
     metadata: ReviewMetadata = field(default_factory=ReviewMetadata)
 
     # -- convenience properties ------------------------------------------------

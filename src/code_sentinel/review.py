@@ -648,9 +648,21 @@ async def _run_pipeline_internal(
             ruleset=loaded_ruleset,
         )
 
+        # Map rule_details to RiskContribution
+        from code_sentinel.result import RiskContribution
+        contributions = [
+            RiskContribution(
+                rule=d.get("description", ""),
+                score_delta=d.get("score_delta", 0),
+                reason=d.get("description", ""),
+                evidence=d.get("tag", ""),
+            )
+            for d in getattr(risk_score, "rule_details", [])
+        ]
         result.risk = RiskSummary(
             level=risk_score.level.value,
             score=risk_score.score,
+            contributions=contributions,
         )
         result.metadata.project_rules_loaded = True
 
@@ -689,6 +701,7 @@ async def _run_pipeline_internal(
         dep_changes=dep_changes,
         github_token=merged.github_token,
         llm_config={"provider": merged.provider, "api_key": merged.api_key},
+        risk_summary=result.risk,
         options=merged,
         step_results=trace.steps,
     )
@@ -735,7 +748,10 @@ async def _run_pipeline_internal(
         _record(trace, "Impact Assessment", "skipped", "risk=low, not triggered")
         _record(trace, "LLM Deep Review", "skipped", "risk=low, not triggered")
 
-    # Aggregate AuditResults into ReviewResult
+    # Store all audit results (built-in + custom)
+    result.agent_results = audit_results
+
+    # Map built-in auditors to ReviewResult fields
     for ar in audit_results:
         if ar.name == "supply_chain":
             result.supply_chain = _map_supply_chain(ar)
@@ -743,7 +759,6 @@ async def _run_pipeline_internal(
             result.impact = _map_impact(ar)
         elif ar.name == "deep_review":
             result.llm_review = _map_llm_review(ar)
-        # User auditors: findings collected in generic list for future use
 
     # ── Record in memory ─────────────────────────────────────────
     if memory:
