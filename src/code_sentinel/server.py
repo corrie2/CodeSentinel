@@ -315,24 +315,22 @@ async def _run_github_audit(owner: str, repo: str, number: int) -> None:
     This runs in a background asyncio task.
     """
     try:
-        from code_sentinel.git_provider.github import GitHubProvider
-        from code_sentinel.cli import _collect_pr_data, _run_pipeline
+        from code_sentinel.review import review, ReviewOptions
 
-        config_obj = _app_state.get("config")
-        if config_obj is None:
-            config_obj = Config()
+        pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
+        options = ReviewOptions(
+            provider=_app_state.get("provider", "mimo"),
+            skip_llm=False,
+        )
+        result = await review(pr_url, options=options)
 
-        async with GitHubProvider(config_obj) as provider:
-            pr_info = await provider.get_pr(owner, repo, number)
-            files = await provider.get_files(owner, repo, number)
+        logger.info(
+            "GitHub audit complete for %s/%s#%d: risk=%s score=%d findings=%d",
+            owner, repo, number, result.risk.level, result.risk.score,
+            len(result.llm_review.findings),
+        )
 
-            logger.info(
-                "GitHub audit complete for %s/%s#%d: %d files, state=%s",
-                owner, repo, number, len(files), pr_info.state,
-            )
-
-            # TODO: Run the full pipeline (risk scoring, supply chain, LLM review)
-            # TODO: Post results back as a PR comment
+        # TODO: Post results back as a PR comment
 
     except Exception:
         logger.exception("Error in GitHub audit for %s/%s#%d", owner, repo, number)

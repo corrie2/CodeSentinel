@@ -134,6 +134,8 @@ class _MergedOptions:
     timeout_seconds: int = 120
     strict: bool = False
     memory_db: str = ""
+    auditors: list | None = None
+    reporters: list | None = None
 
 
 # ── Config helpers ──────────────────────────────────────────────
@@ -209,6 +211,8 @@ def _merge_options(opts: ReviewOptions, cfg: dict[str, str]) -> _MergedOptions:
         timeout_seconds=opts.timeout_seconds,
         strict=opts.strict,
         memory_db=memory_db,
+        auditors=opts.auditors,
+        reporters=opts.reporters,
     )
 
 
@@ -661,152 +665,90 @@ async def _run_pipeline_internal(
             raise RuntimeError(msg) from exc
         result.risk = RiskSummary(level="low", score=0)
 
-    # ── Level 2 & 3: Conditional audits ──────────────────────────
-    supply_chain_result: SupplyChainSummary = SupplyChainSummary()
-    impact_result: ImpactSummary = ImpactSummary()
-    llm_result: LLMReviewSummary = LLMReviewSummary()
+    # ── Level 2 & 3: Plugin-based audits ─────────────────────────
+    from code_sentinel.plugins import AuditContext, AuditResult
+    from code_sentinel.plugins.auditors import (
+        SupplyChainAuditor,
+        ImpactAuditor,
+        DeepReviewAuditor,
+    )
+
     needs_attention: list[AttentionFile] = []
 
+    # Construct AuditContext from collected pipeline state
+    ctx = AuditContext(
+        pr_url=pr_url,
+        pr_info=pr_data.get("pr", {}),
+        changeset=changeset,
+        raw_diff=raw_diff,
+        base_ref=pr_data.get("pr", {}).get("base_sha", ""),
+        head_ref=pr_data.get("pr", {}).get("head_sha", ""),
+        repo_path=merged.repo_path,
+        ruleset=loaded_ruleset,
+        project_context=project_context,
+        dep_changes=dep_changes,
+        github_token=merged.github_token,
+        llm_config={"provider": merged.provider, "api_key": merged.api_key},
+        options=merged,
+        step_results=trace.steps,
+    )
+
+    # Build default auditors based on risk level
+    default_auditors: list = []
     if risk_score and risk_score.level in (RiskLevel.MEDIUM, RiskLevel.HIGH):
-        # Level 2: Supply chain + Impact
-        try:
-            from code_sentinel.auditor.supply_chain import run_supply_chain_audit
-            from code_sentinel.auditor.impact import assess_impact
+        default_auditors.append(SupplyChainAuditor())
+        default_auditors.append(ImpactAuditor())
+        if risk_score.level == RiskLevel.HIGH and not merged.skip_llm:
+            default_auditors.append(DeepReviewAuditor())
 
-            supply_chain_packages = None
-            if dep_changes:
-                from code_sentinel.auditor.supply_chain import (
-                    PackageQuery as SC_PackageQuery,
+    # Merge with user-provided auditors
+    all_auditors = default_auditors + (merged.auditors or [])
+
+    # Trace name mapping for backward compatibility with existing traces
+    _AUDITOR_TRACE_NAMES = {
+        "supply_chain": "OSV Audit",
+        "impact": "Impact Assessment",
+        "deep_review": "LLM Deep Review",
+    }
+
+    # Run all auditors
+    audit_results: list[AuditResult] = []
+    if all_auditors:
+        for auditor in all_auditors:
+            trace_name = _AUDITOR_TRACE_NAMES.get(auditor.name, auditor.name)
+            try:
+                ar = await auditor.audit(ctx)
+                audit_results.append(ar)
+                _record(
+                    trace, trace_name, ar.status,
+                    f"{len(ar.findings)} findings, {len(ar.warnings)} warnings",
                 )
-
-                _OSV_ECOSYSTEM_MAP = {
-                    "npm": "npm", "pypi": "PyPI", "go": "Go",
-                    "cargo": "crates.io", "maven": "Maven", "gradle": "Maven",
-                }
-                supply_chain_packages = [
-                    SC_PackageQuery(
-                        name=c.package,
-                        version=c.new_spec or c.old_spec or "",
-                        ecosystem=_OSV_ECOSYSTEM_MAP.get(c.ecosystem, c.ecosystem),
-                    )
-                    for c in dep_changes
-                    if c.change_type in ("added", "version_changed")
-                    and (c.new_spec or c.old_spec)
-                ]
-
-            sc_report = await run_supply_chain_audit(
-                changed_files=changed_files,
-                packages=supply_chain_packages or None,
-            )
-
-            supply_chain_result = SupplyChainSummary(
-                vulnerabilities=[
-                    Vulnerability(
-                        id=v.vuln_id,
-                        summary=v.summary,
-                        severity=v.display_severity,
-                        package=v.package,
-                        fixed_version=v.fixed_version,
-                    )
-                    for v in getattr(sc_report, "vulnerable_deps", [])
-                ],
-                total_deps=getattr(sc_report, "total_deps", 0),
-                status="ok",
-            )
-
-            _vuln_count = len(getattr(sc_report, "vulnerable_deps", []))
-            _query_failed = len(getattr(sc_report, "errors", []))
-            if _query_failed > 0:
-                supply_chain_result.status = "partial"
-                supply_chain_result.error = f"OSV query failed for {_query_failed} packages"
-                _record(trace, "OSV Audit", "partial", supply_chain_result.error)
-            else:
-                _record(trace, "OSV Audit", "ok", f"{_vuln_count} vulnerabilities found")
-
-            imp_report = assess_impact(changed_files)
-            impact_result = ImpactSummary(
-                estimated_build_seconds=getattr(imp_report, "estimated_build_seconds", 0),
-                affected_modules=[
-                    m.module for m in getattr(imp_report, "affected_modules", [])
-                ],
-                build_risk=getattr(imp_report, "build_risk", "low"),
-                test_coverage_risk=getattr(imp_report, "test_coverage_risk", "low"),
-                status="ok",
-            )
-            _record(
-                trace, "Impact Assessment", "ok",
-                f"Build impact: +{impact_result.estimated_build_seconds}s",
-            )
-        except Exception as exc:
-            msg = f"Level 2 audit failed: {exc}"
-            supply_chain_result.status = "failed"
-            supply_chain_result.error = msg
-            impact_result.status = "failed"
-            _record(trace, "OSV Audit / Impact", "failed", msg)
-            if merged.strict:
-                raise RuntimeError(msg) from exc
-
-        if risk_score.level == RiskLevel.HIGH:
-            if not merged.skip_llm:
-                try:
-                    from code_sentinel.auditor.deep_review import run_deep_review
-
-                    findings = await run_deep_review(
-                        changeset=changeset,
-                        risk_score=risk_score,
-                        config=config_obj,
-                        raw_diff=raw_diff,
-                        module_densities=module_densities or None,
-                        project_context=project_context or None,
-                        critical_paths=getattr(loaded_ruleset, "critical_paths", None),
-                    )
-                    if findings:
-                        llm_result = LLMReviewSummary(
-                            findings=[
-                                Finding(
-                                    issue_type=getattr(f, "issue_type", ""),
-                                    severity=getattr(f, "severity", "info"),
-                                    file=getattr(f, "file", ""),
-                                    line=getattr(f, "line", 0),
-                                    description=getattr(f, "description", ""),
-                                    evidence=getattr(f, "evidence", ""),
-                                    test_suggestion=getattr(f, "test_suggestion", ""),
-                                )
-                                for f in findings
-                            ],
-                            status="ok",
-                        )
-                        _record(trace, "LLM Deep Review", "ok", f"{len(findings)} findings")
-                    else:
-                        llm_result.status = "ok"
-                        _record(trace, "LLM Deep Review", "ok", "0 findings")
-                except Exception as exc:
-                    msg = str(exc)
-                    llm_result.status = "failed"
-                    llm_result.error = msg
-                    if "timeout" in msg.lower():
-                        _record(trace, "LLM Deep Review", "failed", "LLM timeout")
-                    else:
-                        _record(trace, "LLM Deep Review", "failed", f"LLM error: {msg}")
-                    if merged.strict:
-                        raise RuntimeError(f"Deep review failed: {exc}") from exc
-            else:
-                _record(trace, "LLM Deep Review", "skipped", "skip_llm=True")
-        else:
-            _record(trace, "LLM Deep Review", "skipped", "risk=medium, not triggered")
+            except Exception as exc:
+                ar = AuditResult(name=auditor.name, status="failed", error=str(exc))
+                audit_results.append(ar)
+                _record(trace, trace_name, "failed", str(exc))
+                if merged.strict:
+                    raise RuntimeError(f"{trace_name} failed: {exc}") from exc
     else:
+        # Low risk: record skipped entries for trace visibility
         _record(trace, "OSV Audit", "skipped", "risk=low, not triggered")
         _record(trace, "Impact Assessment", "skipped", "risk=low, not triggered")
         _record(trace, "LLM Deep Review", "skipped", "risk=low, not triggered")
 
-    result.supply_chain = supply_chain_result
-    result.impact = impact_result
-    result.llm_review = llm_result
+    # Aggregate AuditResults into ReviewResult
+    for ar in audit_results:
+        if ar.name == "supply_chain":
+            result.supply_chain = _map_supply_chain(ar)
+        elif ar.name == "impact":
+            result.impact = _map_impact(ar)
+        elif ar.name == "deep_review":
+            result.llm_review = _map_llm_review(ar)
+        # User auditors: findings collected in generic list for future use
 
     # ── Record in memory ─────────────────────────────────────────
     if memory:
         try:
-            findings_list = llm_result.findings if llm_result.findings else []
+            findings_list = result.llm_review.findings if result.llm_review.findings else []
             memory.record_review(
                 pr_url=pr_data.get("pr", {}).get("url", ""),
                 risk_level=result.risk.level,
@@ -848,6 +790,24 @@ async def _run_pipeline_internal(
     result.metadata.duration_seconds = time.monotonic() - t0
     result.metadata.codesentinel_modified = codesentinel_modified
 
+    # ── Run reporters ────────────────────────────────────────────
+    from code_sentinel.plugins.reporters import (
+        MarkdownReporter,
+        JsonReporter,
+        PrCommentReporter,
+    )
+
+    default_reporters = [MarkdownReporter(), JsonReporter(), PrCommentReporter()]
+    all_reporters = default_reporters + (merged.reporters or [])
+
+    for reporter in all_reporters:
+        try:
+            output = reporter.render(result)
+            result.reports[reporter.name] = output
+        except Exception as exc:
+            result.reports[reporter.name] = f"Error: {exc}"
+            logger.warning("Reporter %s failed: %s", reporter.name, exc)
+
     # ── Final check: strict mode ─────────────────────────────────
     if merged.strict and trace_has_failures(trace):
         failed_names = ", ".join(s.name for s in trace.steps if s.status == "failed")
@@ -871,3 +831,59 @@ def _dep_to_dict(dep: Any) -> dict[str, Any]:
     if hasattr(dep, "__dict__"):
         return dep.__dict__
     return {"raw": str(dep)}
+
+
+# ── Plugin result mappers ───────────────────────────────────────
+
+
+def _map_supply_chain(ar: "AuditResult") -> SupplyChainSummary:
+    """Map a supply_chain AuditResult to a SupplyChainSummary."""
+    vulns = []
+    for v in ar.artifacts.get("vulnerable_deps", []):
+        vulns.append(Vulnerability(
+            id=v.get("vuln_id", ""),
+            summary=v.get("summary", ""),
+            severity=v.get("severity", ""),
+            package=v.get("package", ""),
+            fixed_version=v.get("fixed_version"),
+        ))
+    return SupplyChainSummary(
+        vulnerabilities=vulns,
+        total_deps=ar.artifacts.get("total_deps", 0),
+        status=ar.status,
+        error=ar.error,
+    )
+
+
+def _map_impact(ar: "AuditResult") -> ImpactSummary:
+    """Map an impact AuditResult to an ImpactSummary."""
+    return ImpactSummary(
+        estimated_build_seconds=ar.artifacts.get("estimated_build_seconds", 0),
+        affected_modules=[
+            m.get("module", "") if isinstance(m, dict) else str(m)
+            for m in ar.artifacts.get("affected_modules", [])
+        ],
+        build_risk=ar.artifacts.get("build_risk", "low"),
+        test_coverage_risk=ar.artifacts.get("test_coverage_risk", "low"),
+        status=ar.status,
+    )
+
+
+def _map_llm_review(ar: "AuditResult") -> LLMReviewSummary:
+    """Map a deep_review AuditResult to an LLMReviewSummary."""
+    findings = []
+    for f in ar.findings:
+        findings.append(Finding(
+            issue_type=f.get("issue_type", ""),
+            severity=f.get("severity", "info"),
+            file=f.get("file", ""),
+            line=f.get("line", 0),
+            description=f.get("description", ""),
+            evidence=f.get("evidence", ""),
+            test_suggestion=f.get("test_suggestion", ""),
+        ))
+    return LLMReviewSummary(
+        findings=findings,
+        status=ar.status,
+        error=ar.error,
+    )
