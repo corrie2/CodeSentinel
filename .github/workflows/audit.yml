@@ -75,5 +75,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: codesentinel-report
-          path: report.md
+          path: report.*
           if-no-files-found: ignore

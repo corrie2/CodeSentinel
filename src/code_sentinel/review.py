@@ -21,6 +21,7 @@ Or synchronously::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -96,7 +97,19 @@ async def review(
     config_dict = _load_config()
     merged = _merge_options(opts, config_dict)
 
-    return await _run_pipeline_internal(pr_url, merged, opts)
+    # Enforce overall timeout
+    try:
+        async with asyncio.timeout(merged.timeout_seconds):
+            return await _run_pipeline_internal(pr_url, merged, opts)
+    except TimeoutError:
+        # Return partial result on timeout
+        result = ReviewResult(pr_url=pr_url)
+        result.pipeline.steps.append(PipelineStep(
+            name="pipeline", status="failed",
+            message=f"Pipeline timed out after {merged.timeout_seconds}s",
+        ))
+        result.metadata.duration_seconds = float(merged.timeout_seconds)
+        return result
 
 
 def review_sync(
@@ -724,6 +737,12 @@ async def _run_pipeline_internal(
         "deep_review": "LLM Deep Review",
     }
 
+    # Always record skipped traces for built-in auditors when risk is low
+    if not (risk_score and risk_score.level in (RiskLevel.MEDIUM, RiskLevel.HIGH)):
+        _record(trace, "OSV Audit", "skipped", "risk=low, not triggered")
+        _record(trace, "Impact Assessment", "skipped", "risk=low, not triggered")
+        _record(trace, "LLM Deep Review", "skipped", "risk=low, not triggered")
+
     # Run all auditors
     audit_results: list[AuditResult] = []
     if all_auditors:
@@ -742,11 +761,7 @@ async def _run_pipeline_internal(
                 _record(trace, trace_name, "failed", str(exc))
                 if merged.strict:
                     raise RuntimeError(f"{trace_name} failed: {exc}") from exc
-    else:
-        # Low risk: record skipped entries for trace visibility
-        _record(trace, "OSV Audit", "skipped", "risk=low, not triggered")
-        _record(trace, "Impact Assessment", "skipped", "risk=low, not triggered")
-        _record(trace, "LLM Deep Review", "skipped", "risk=low, not triggered")
+
 
     # Store all audit results (built-in + custom)
     result.agent_results = audit_results
@@ -819,9 +834,13 @@ async def _run_pipeline_internal(
         try:
             output = reporter.render(result)
             result.reports[reporter.name] = output
+            _record(trace, f"Reporter: {reporter.name}", "ok", f"rendered {len(output)} chars")
         except Exception as exc:
             result.reports[reporter.name] = f"Error: {exc}"
+            _record(trace, f"Reporter: {reporter.name}", "failed", str(exc))
             logger.warning("Reporter %s failed: %s", reporter.name, exc)
+            if merged.strict:
+                raise RuntimeError(f"Reporter {reporter.name} failed: {exc}") from exc
 
     # ── Final check: strict mode ─────────────────────────────────
     if merged.strict and trace_has_failures(trace):

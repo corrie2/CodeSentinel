@@ -69,9 +69,20 @@ runs:
           ARGS="$ARGS --provider $PROVIDER"
         fi
 
-        codesentinel $ARGS --output report.md
+        # Determine output filename based on format
+        if [ "$FORMAT" = "json" ]; then
+          REPORT_FILE="report.json"
+        else
+          REPORT_FILE="report.md"
+        fi
 
-        # Extract risk level for output
-        RISK=$(grep -oiP '(Low|Medium|High) Risk' report.md | head -1 | awk '{print tolower($1)}' || echo "unknown")
+        codesentinel $ARGS --output "$REPORT_FILE"
+
+        # Extract risk level for output (works for both markdown and JSON)
+        if [ "$FORMAT" = "json" ]; then
+          RISK=$(python3 -c "import json,sys; d=json.load(open('$REPORT_FILE')); print(d.get('risk',{}).get('level','unknown'))" 2>/dev/null || echo "unknown")
+        else
+          RISK=$(grep -oiP '(Low|Medium|High) Risk' "$REPORT_FILE" | head -1 | awk '{print tolower($1)}' || echo "unknown")
+        fi
         echo "risk_level=$RISK" >> "$GITHUB_OUTPUT"
-        echo "report_path=report.md" >> "$GITHUB_OUTPUT"
+        echo "report_path=$REPORT_FILE" >> "$GITHUB_OUTPUT"
