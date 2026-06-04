@@ -335,7 +335,7 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
     """
     try:
         from code_sentinel.review import review, ReviewOptions
-        from code_sentinel.reporter.formatter import render_pr_comment, build_report_context, PRMetadata, ReviewResults
+        from code_sentinel.reporter.formatter import render_pr_comment, build_report_context, PRMetadata
 
         cfg = _app_state.get("config")
         if provider_type == "gitlab":
@@ -346,6 +346,7 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
         options = ReviewOptions(
             provider=getattr(cfg, "provider", "mimo") if cfg else "mimo",
             github_token=getattr(cfg, "github_token", None) if cfg else None,
+            gitlab_token=getattr(cfg, "gitlab_token", None) if cfg else None,
             skip_llm=False,
         )
         result = await review(url, options=options)
@@ -372,15 +373,13 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
                     base_branch=result.base_branch,
                     head_branch=result.head_branch,
                 )
-                review_results = ReviewResults(
-                    risk_level=result.risk.level,
+                ctx = build_report_context(
+                    pr=pr_meta,
                     risk_score=result.risk.score,
+                    risk_level=result.risk.level,
                     risk_details=result.risk.contributions,
-                    deep_review=result.llm_review,
                     needs_attention=result.needs_attention,
-                    recommendations=result.recommendations,
                 )
-                ctx = build_report_context(pr_meta, review_results)
                 comment_body = render_pr_comment(ctx)
             except Exception as exc:
                 logger.warning("Failed to render PR comment: %s", exc)
