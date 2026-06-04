@@ -90,6 +90,8 @@ class GitHubProvider(BaseGitProvider):
             head_branch=data.get("head", {}).get("ref", ""),
             state=data.get("state", ""),
             labels=[lbl["name"] for lbl in data.get("labels", [])],
+            base_sha=data.get("base", {}).get("sha", ""),
+            head_sha=data.get("head", {}).get("sha", ""),
         )
 
     async def get_diff(self, owner: str, repo: str, number: int) -> str:

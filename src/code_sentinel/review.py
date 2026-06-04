@@ -266,6 +266,25 @@ def _full_project_path(owner: str, repo: str) -> str:
     return owner
 
 
+def _create_provider(provider_type: str, config_obj: Any):
+    """Create the appropriate git provider based on provider_type."""
+    if provider_type == "gitlab":
+        from code_sentinel.git_provider.gitlab import GitLabProvider
+        return GitLabProvider(config_obj)
+    else:
+        from code_sentinel.git_provider.github import GitHubProvider
+        return GitHubProvider(config_obj)
+
+
+def _provider_owner_repo(owner: str, repo: str, provider_type: str) -> tuple[str, str]:
+    """Return (owner, repo) args appropriate for the provider.
+
+    For GitLab, returns (full_project_path, ""). For GitHub, returns (owner, repo).
+    """
+    if provider_type == "gitlab":
+        return _full_project_path(owner, repo), ""
+    return owner, repo
+
 
 def _record(trace: PipelineTrace, name: str, status: str, message: str) -> None:
     """Append a step to the pipeline trace."""
@@ -312,14 +331,8 @@ async def _collect_pr_data(
                 pr_info = await provider.get_pr(owner, repo, pr_number)
             result["pr"]["title"] = pr_info.title
             result["pr"]["author"] = pr_info.author
-
-            if provider_type == "github":
-                try:
-                    raw_pr = await provider._get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
-                    result["pr"]["base_sha"] = raw_pr.get("base", {}).get("sha", "")
-                    result["pr"]["head_sha"] = raw_pr.get("head", {}).get("sha", "")
-                except Exception:
-                    pass
+            result["pr"]["base_sha"] = pr_info.base_sha
+            result["pr"]["head_sha"] = pr_info.head_sha
 
             if provider_type == "gitlab":
                 result["diff"] = await provider.get_diff(project_path, "", pr_number)
@@ -479,16 +492,15 @@ async def _run_pipeline_internal(
                     base_sha = pr_data.get("pr", {}).get("base_sha", "")
                     head_sha = pr_data.get("pr", {}).get("head_sha", "")
                     if base_sha and head_sha:
-                        from code_sentinel.git_provider.github import GitHubProvider
-
-                        async with GitHubProvider(config_obj) as gh_layer3:
+                        prov_owner, prov_repo = _provider_owner_repo(owner, repo, provider_type)
+                        async with _create_provider(provider_type, config_obj) as layer3_provider:
                             for dep_file in dep_filenames:
                                 try:
-                                    old_content = await gh_layer3.get_file_content(
-                                        owner, repo, dep_file, ref=base_sha
+                                    old_content = await layer3_provider.get_file_content(
+                                        prov_owner, prov_repo, dep_file, ref=base_sha
                                     )
-                                    new_content = await gh_layer3.get_file_content(
-                                        owner, repo, dep_file, ref=head_sha
+                                    new_content = await layer3_provider.get_file_content(
+                                        prov_owner, prov_repo, dep_file, ref=head_sha
                                     )
                                     if old_content or new_content:
                                         layer3_changes = compute_dep_diff(
@@ -552,13 +564,12 @@ async def _run_pipeline_internal(
 
     try:
         if base_sha and owner and repo:
-            from code_sentinel.git_provider.github import GitHubProvider
-
-            async with GitHubProvider(config_obj) as gh_ctx:
+            prov_owner, prov_repo = _provider_owner_repo(owner, repo, provider_type)
+            async with _create_provider(provider_type, config_obj) as ctx_provider:
                 for ctx_file in ("project_profile.md", "review_policy.md"):
                     try:
-                        raw = await gh_ctx.get_file_content(
-                            owner, repo, f".codesentinel/{ctx_file}", ref=base_sha
+                        raw = await ctx_provider.get_file_content(
+                            prov_owner, prov_repo, f".codesentinel/{ctx_file}", ref=base_sha
                         )
                         if raw:
                             sanitized = "\n".join(
@@ -654,11 +665,10 @@ async def _run_pipeline_internal(
             _rules_loaded = False
             if base_sha and owner and repo:
                 try:
-                    from code_sentinel.git_provider.github import GitHubProvider
-
-                    async with GitHubProvider(config_obj) as gh_rules:
-                        rules_content = await gh_rules.get_file_content(
-                            owner, repo, ".codesentinel/rules.toml", ref=base_sha
+                    prov_owner, prov_repo = _provider_owner_repo(owner, repo, provider_type)
+                    async with _create_provider(provider_type, config_obj) as rules_provider:
+                        rules_content = await rules_provider.get_file_content(
+                            prov_owner, prov_repo, ".codesentinel/rules.toml", ref=base_sha
                         )
                         if rules_content:
                             tmp = tempfile.NamedTemporaryFile(

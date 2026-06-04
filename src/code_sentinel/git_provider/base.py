@@ -36,6 +36,8 @@ class PRInfo:
     head_branch: str
     state: str  # "open", "closed", "merged"
     labels: list[str] = field(default_factory=list)
+    base_sha: str = ""
+    head_sha: str = ""
 
 
 @dataclass(frozen=True)

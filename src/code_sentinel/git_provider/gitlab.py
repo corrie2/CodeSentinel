@@ -188,6 +188,9 @@ class GitLabProvider(BaseGitProvider):
 
         state = _STATE_MAP.get(data.get("state", ""), data.get("state", ""))
 
+        # Extract base/head SHA from diff_refs (available for open MRs)
+        diff_refs = data.get("diff_refs", {}) or {}
+
         return PRInfo(
             title=data.get("title", ""),
             body=data.get("description", "") or "",
@@ -196,6 +199,8 @@ class GitLabProvider(BaseGitProvider):
             head_branch=data.get("source_branch", ""),
             state=state,
             labels=data.get("labels", []),
+            base_sha=diff_refs.get("base_sha", ""),
+            head_sha=diff_refs.get("head_sha", ""),
         )
 
     async def get_diff(self, owner: str, repo: str, number: int) -> str:
