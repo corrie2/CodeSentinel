@@ -22,9 +22,9 @@ import json
 import logging
 import os
 import time
-from typing import Any, Optional
+from typing import Any
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse
 
 from code_sentinel.config import Config
@@ -45,10 +45,23 @@ _app_state: dict[str, Any] = {
     "config": None,
 }
 
+# Track background tasks to prevent GC and log unhandled exceptions
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _task_done_callback(task: asyncio.Task) -> None:
+    """Log unhandled exceptions from background tasks and remove from tracking."""
+    _background_tasks.discard(task)
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.exception("Background audit task failed: %s", exc, exc_info=exc)
+
 
 def create_app(
     webhook_secret: str = "",
-    config: Optional[Config] = None,
+    config: Config | None = None,
 ) -> FastAPI:
     """Create and configure the FastAPI application.
 
@@ -120,8 +133,8 @@ async def health():
 @app.post("/webhook/github", status_code=202)
 async def webhook_github(
     request: Request,
-    x_hub_signature_256: Optional[str] = Header(None, alias="X-Hub-Signature-256"),
-    x_github_event: Optional[str] = Header(None, alias="X-GitHub-Event"),
+    x_hub_signature_256: str | None = Header(None, alias="X-Hub-Signature-256"),
+    x_github_event: str | None = Header(None, alias="X-GitHub-Event"),
 ):
     """Handle GitHub webhook events.
 
@@ -172,10 +185,12 @@ async def webhook_github(
 
     logger.info("GitHub PR webhook received: %s/%s#%d (action=%s)", owner, repo, number, action)
 
-    # Fire-and-forget the audit pipeline
-    asyncio.create_task(
-        _run_github_audit(owner=owner, repo=repo, number=number)
+    # Schedule audit with proper error tracking
+    task = asyncio.create_task(
+        _run_audit("github", owner, repo, number)
     )
+    _background_tasks.add(task)
+    task.add_done_callback(_task_done_callback)
 
     return JSONResponse(
         content={
@@ -193,8 +208,8 @@ async def webhook_github(
 @app.post("/webhook/gitlab", status_code=202)
 async def webhook_gitlab(
     request: Request,
-    x_gitlab_token: Optional[str] = Header(None, alias="X-Gitlab-Token"),
-    x_gitlab_event: Optional[str] = Header(None, alias="X-Gitlab-Event"),
+    x_gitlab_token: str | None = Header(None, alias="X-Gitlab-Token"),
+    x_gitlab_event: str | None = Header(None, alias="X-Gitlab-Event"),
 ):
     """Handle GitLab webhook events.
 
@@ -227,24 +242,25 @@ async def webhook_gitlab(
 
     attrs = payload.get("object_attributes", {})
     action = attrs.get("action", "")
-    state = attrs.get("state", "")
 
     # Only process open/reopen/update actions
     if action not in ("open", "reopen", "update"):
         return JSONResponse(
-            content={"message": f"Igoring MR action: {action}"},
+            content={"message": f"Ignoring MR action: {action}"},
             status_code=202,
         )
 
     project = payload.get("project", {})
-    # GitLab provides full_path like "group/repo"
+    # GitLab provides full_path like "group/subgroup/repo" — use as-is
     full_path = project.get("path_with_namespace", "")
-    parts = full_path.split("/", 1)
-    if len(parts) != 2:
+    if not full_path or "/" not in full_path:
         raise HTTPException(
             status_code=400,
             detail=f"Cannot parse project path: {full_path}",
         )
+    # Split into owner (everything except last segment) and repo (last segment)
+    # This handles nested namespaces: "group/subgroup/project" -> owner="group/subgroup", repo="project"
+    parts = full_path.rsplit("/", 1)
     owner, repo = parts[0], parts[1]
     number = attrs.get("iid", 0)
 
@@ -253,10 +269,12 @@ async def webhook_gitlab(
 
     logger.info("GitLab MR webhook received: %s/%s#%d (action=%s)", owner, repo, number, action)
 
-    # Fire-and-forget the audit pipeline
-    asyncio.create_task(
-        _run_gitlab_audit(owner=owner, repo=repo, number=number)
+    # Schedule audit with proper error tracking
+    task = asyncio.create_task(
+        _run_audit("gitlab", owner, repo, number)
     )
+    _background_tasks.add(task)
+    task.add_done_callback(_task_done_callback)
 
     return JSONResponse(
         content={
@@ -306,62 +324,40 @@ def _verify_github_signature(
     return hmac.compare_digest(parts[1], expected)
 
 
-# ── Background Audit Pipelines ─────────────────────────────────────
+# ── Background Audit Pipeline ──────────────────────────────────────
 
 
-async def _run_github_audit(owner: str, repo: str, number: int) -> None:
-    """Run the audit pipeline for a GitHub PR and post results.
+async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> None:
+    """Run the audit pipeline for a GitHub PR or GitLab MR.
 
-    This runs in a background asyncio task.
+    This runs in a background asyncio task.  Errors are logged but not
+    propagated — the webhook has already returned 202.
     """
     try:
         from code_sentinel.review import review, ReviewOptions
 
         cfg = _app_state.get("config")
-        pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
+        if provider_type == "gitlab":
+            url = f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{number}"
+        else:
+            url = f"https://github.com/{owner}/{repo}/pull/{number}"
+
         options = ReviewOptions(
             provider=getattr(cfg, "provider", "mimo") if cfg else "mimo",
             github_token=getattr(cfg, "github_token", None) if cfg else None,
             skip_llm=False,
         )
-        result = await review(pr_url, options=options)
+        result = await review(url, options=options)
 
         logger.info(
-            "GitHub audit complete for %s/%s#%d: risk=%s score=%d findings=%d",
-            owner, repo, number, result.risk.level, result.risk.score,
+            "%s audit complete for %s/%s#%d: risk=%s score=%d findings=%d",
+            provider_type.capitalize(),
+            owner, repo, number,
+            result.risk.level, result.risk.score,
             len(result.llm_review.findings),
         )
 
-        # TODO: Post results back as a PR comment
+        # TODO: Post results back as a PR/MR comment
 
     except Exception:
-        logger.exception("Error in GitHub audit for %s/%s#%d", owner, repo, number)
-
-
-async def _run_gitlab_audit(owner: str, repo: str, number: int) -> None:
-    """Run the audit pipeline for a GitLab MR and post results.
-
-    This runs in a background asyncio task.
-    """
-    try:
-        from code_sentinel.review import review, ReviewOptions
-
-        cfg = _app_state.get("config")
-        mr_url = f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{number}"
-        options = ReviewOptions(
-            provider=getattr(cfg, "provider", "mimo") if cfg else "mimo",
-            github_token=getattr(cfg, "github_token", None) if cfg else None,
-            skip_llm=False,
-        )
-        result = await review(mr_url, options=options)
-
-        logger.info(
-            "GitLab audit complete for %s/%s#%d: risk=%s score=%d findings=%d",
-            owner, repo, number, result.risk.level, result.risk.score,
-            len(result.llm_review.findings),
-        )
-
-        # TODO: Post results back as an MR note
-
-    except Exception:
-        logger.exception("Error in GitLab audit for %s/%s#%d", owner, repo, number)
+        logger.exception("Error in %s audit for %s/%s#%d", provider_type, owner, repo, number)

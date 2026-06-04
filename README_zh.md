@@ -1,12 +1,12 @@
-**English** | [中文](README_zh.md)
+**[English](README.md)** | 中文
 
-# CodeSentinel — Risk Advisor & Ecosystem Auditor
+# CodeSentinel — PR 风险顾问 & 生态审计官
 
-PR risk advisor and ecosystem auditor.
+PR 风险顾问 & 生态审计官。
 
-Feed it a PR, get back a structured risk assessment report. Not a bug finder — it tells you **whether this PR will blow up and when it can be merged**.
+输入一个 PR，输出一份结构化的风险评估报告。不是找 bug 的工具，而是告诉你**这个 PR 会不会炸、什么时候能合并**。
 
-## Quick Start
+## 快速开始
 
 ```bash
 # Install
@@ -14,12 +14,12 @@ pip install -e .
 # or
 uv sync
 
-# Review a GitHub PR
+# 审查 GitHub PR
 export GITHUB_TOKEN=***
 export MIMO_API_KEY=***
 codesentinel review https://github.com/owner/repo/pull/123
 
-# Review a GitLab MR (supports nested namespaces)
+# 审查 GitLab MR（支持嵌套命名空间）
 export GITLAB_TOKEN=***
 codesentinel review https://gitlab.com/group/subgroup/project/-/merge_requests/456
 
@@ -33,27 +33,27 @@ codesentinel review <pr_url> --skip-llm
 codesentinel review <pr_url> --repo-path ./my-repo
 ```
 
-## Architecture
+## 架构
 
-Three-level funnel model:
+三级漏斗模型：
 
 ```
-PR → [Level 1: Risk Scoring] → Low risk: log only
-                               → Medium risk: +supply chain audit +engineering impact
-                               → High risk: +LLM deep review (issues + evidence + test skeletons)
+PR → [Level 1: 风险评分] → 低风险: 仅记录
+                           → 中风险: +供应链审计 +工程影响
+                           → 高风险: +LLM深度审查 (问题+证据+测试骨架)
 ```
 
-### Level 1 — Risk Scoring (seconds)
+### Level 1 — 风险评分（秒级）
 
-Deterministic rule engine, no LLM dependency. 19 built-in rules covering:
+确定性规则引擎，不依赖 LLM。19 条内置规则覆盖：
 
-- Change scale (file count, line count, hunk count)
-- Sensitive paths (payment/, auth/, security/)
-- Dependency changes (additions, upgrades, removals)
-- Author experience (first-time contributor, module familiarity)
-- Project critical paths (customizable via .codesentinel/rules.toml)
+- 变更规模（文件数、行数、hunk 数）
+- 敏感路径（payment/、auth/、security/）
+- 依赖变更（新增、升级、删除）
+- 作者经验（首次贡献、模块熟悉度）
+- 项目关键路径（.codesentinel/rules.toml 自定义）
 
-Output: risk level (low/medium/high) + contribution breakdown:
+输出：风险等级（低/中/高）+ 贡献来源明细：
 ```
 Risk Level: ⚠️ Medium
 Risk Points: 8
@@ -61,29 +61,29 @@ Risk Points: 8
   +3 large PR (25 files)
 ```
 
-### Level 2 — Supply Chain Audit + Engineering Impact (minutes)
+### Level 2 — 供应链审计 + 工程影响（分钟级）
 
-- **Supply Chain Audit**: Queries OSV database for dependency CVEs and license risks
-- **Engineering Impact Assessment**: Estimates build time changes, test coverage impact, module coupling
-- **Dependency Scan**: Three-layer architecture (detect → patch parse → full diff), supports 8 package manager formats
+- **供应链审计**：查询 OSV 数据库，检测依赖 CVE、许可证风险
+- **工程影响评估**：预估构建时间变化、测试覆盖影响、模块耦合度
+- **依赖扫描**：三层架构（detect → patch parse → full diff），支持 8 种包管理格式
 
-### Level 3 — LLM Deep Review (on-demand)
+### Level 3 — LLM 深度审查（按需）
 
-Only triggered for high-risk PRs. Uses risk-aware file selection:
+仅高风险 PR 触发。使用 risk-aware 文件选择：
 
-- Sensitive paths: +50
-- Config/dependency files: +40
-- Project critical paths: +weight
-- High-defect modules: +30
-- No corresponding tests: +20
-- Production paths: +15
-- Deleted code: +15
-- Permission logic: +25
-- Error handling: +15
+- 敏感路径：+50
+- 配置/依赖文件：+40
+- 项目关键路径：+weight
+- 高缺陷模块：+30
+- 无对应测试：+20
+- 生产路径：+15
+- 删除代码：+15
+- 权限逻辑：+25
+- 错误处理：+15
 
-Output: issue description + evidence + executable test skeleton.
+输出：问题描述 + 证据 + 可执行测试骨架。
 
-## Project Rules
+## 项目规则
 
 ```bash
 # Generate project-specific rules
@@ -92,13 +92,13 @@ codesentinel init --minimal   # Only rules.toml
 codesentinel init --force     # Overwrite existing
 ```
 
-Generates a `.codesentinel/` directory:
+生成 `.codesentinel/` 目录：
 
 ```
 .codesentinel/
-  rules.toml            # Risk rules + critical paths
-  project_profile.md    # Project context (injected into LLM prompt)
-  review_policy.md      # Review principles (injected into LLM prompt)
+  rules.toml            # 风险规则 + 关键路径
+  project_profile.md    # 项目背景（注入 LLM prompt）
+  review_policy.md      # 审查原则（注入 LLM prompt）
 ```
 
 ### rules.toml
@@ -122,18 +122,18 @@ critical_paths = [
 ]
 ```
 
-### Security Mechanism
+### 安全机制
 
-`.codesentinel/` configuration is always read from the **base branch**, not the PR head.
+`.codesentinel/` 配置永远从 **base branch** 读取，不读 PR head。
 
-If a PR modifies `.codesentinel/`, the report will show:
-> ⚠️ Review policy was modified by this PR — this review uses the base branch config; the new policy takes effect after merge.
+如果 PR 修改了 `.codesentinel/`，报告会显示：
+> ⚠️ 审查策略被本次PR修改 — 本次审查使用 base branch 配置，新策略将在合并后生效。
 
-This prevents malicious PRs from injecting prompts via config changes.
+防止恶意 PR 通过修改配置注入 prompt。
 
-## Pipeline Status
+## 流水线状态
 
-Every step has status tracking, visible in the report:
+每步都有状态追踪，报告里可见：
 
 ```
 | Step              | Status | Detail                          |
@@ -149,9 +149,9 @@ Every step has status tracking, visible in the report:
 
 ## Python API
 
-CodeSentinel can be used as a Python library — no CLI required.
+CodeSentinel 可以作为 Python 库使用，无需 CLI。
 
-### Async (recommended)
+### 异步（推荐）
 
 ```python
 import asyncio
@@ -165,7 +165,7 @@ async def main():
     )
     print(f"Risk: {result.risk.level} ({result.risk.score} points)")
 
-    # GitLab MR (supports nested namespaces)
+    # GitLab MR（支持嵌套命名空间）
     result = await review(
         "https://gitlab.com/group/subgroup/project/-/merge_requests/456",
         options=ReviewOptions(provider="mimo"),
@@ -175,7 +175,7 @@ async def main():
 asyncio.run(main())
 ```
 
-### Synchronous
+### 同步
 
 ```python
 from code_sentinel import review_sync, ReviewOptions
@@ -189,7 +189,7 @@ print(result.summary)
 
 ### ReviewOptions
 
-All fields are optional — anything left as `None` is resolved from config file and environment variables.
+所有字段都是可选的 — 留空为 `None` 时从配置文件和环境变量解析。
 
 ```python
 ReviewOptions(
@@ -226,13 +226,13 @@ result.has_findings            # bool
 result.to_dict()               # serialize to plain dict
 ```
 
-## Plugins
+## 插件系统
 
-CodeSentinel has a plugin system for auditors and reporters.
+CodeSentinel 支持 auditor 和 reporter 插件扩展。
 
 ### AuditorPlugin
 
-Add custom analysis steps to the pipeline. Subclass `AuditorPlugin` and implement `audit()`:
+向流水线添加自定义分析步骤。继承 `AuditorPlugin` 并实现 `audit()`：
 
 ```python
 from code_sentinel.plugins import AuditorPlugin, AuditContext, AuditResult
@@ -248,11 +248,11 @@ class MyAuditor(AuditorPlugin):
         return result
 ```
 
-Pass it via `ReviewOptions(auditors=[MyAuditor()])`.
+通过 `ReviewOptions(auditors=[MyAuditor()])` 传入。
 
 ### ReporterPlugin
 
-Add custom output formats. Subclass `ReporterPlugin` and implement `render()`:
+添加自定义输出格式。继承 `ReporterPlugin` 并实现 `render()`：
 
 ```python
 from code_sentinel.plugins import ReporterPlugin
@@ -265,41 +265,41 @@ class SlackReporter(ReporterPlugin):
         return f"Risk: {result.risk.level} ({result.risk.score})"
 ```
 
-Pass it via `ReviewOptions(reporters=[SlackReporter()])`. The rendered output is available in `result.reports["slack"]`.
+通过 `ReviewOptions(reporters=[SlackReporter()])` 传入。渲染后的输出在 `result.reports["slack"]` 中。
 
-### Built-in Plugins
+### 内置插件
 
-| Plugin | Type | Name | Description |
-|--------|------|------|-------------|
-| `MarkdownReporter` | Reporter | `markdown` | Full Markdown report |
-| `JsonReporter` | Reporter | `json` | JSON serialization |
-| `PrCommentReporter` | Reporter | `pr-comment` | GitHub PR comment format |
-| `SupplyChainAuditor` | Auditor | `supply_chain` | OSV vulnerability scan |
-| `ImpactAuditor` | Auditor | `impact` | Build/test impact assessment |
-| `DeepReviewAuditor` | Auditor | `deep_review` | LLM deep review (high-risk only) |
+| 插件 | 类型 | 名称 | 描述 |
+|------|------|------|------|
+| `MarkdownReporter` | Reporter | `markdown` | 完整 Markdown 报告 |
+| `JsonReporter` | Reporter | `json` | JSON 序列化 |
+| `PrCommentReporter` | Reporter | `pr-comment` | GitHub PR 评论格式 |
+| `SupplyChainAuditor` | Auditor | `supply_chain` | OSV 漏洞扫描 |
+| `ImpactAuditor` | Auditor | `impact` | 构建/测试影响评估 |
+| `DeepReviewAuditor` | Auditor | `deep_review` | LLM 深度审查（仅高风险） |
 
-## Examples
+## 示例
 
-See the `examples/` directory:
+查看 `examples/` 目录：
 
-| File | Description |
-|------|-------------|
-| `examples/basic.py` | Async review with one line |
-| `examples/basic_sync.py` | Synchronous usage |
-| `examples/custom_rules.py` | Project-specific rules.toml |
-| `examples/custom_reporter.py` | Custom Slack reporter plugin |
-| `examples/custom_auditor.py` | Custom SQL injection & credential auditor |
-| `examples/ci_pipeline.py` | CI/CD integration with exit codes |
+| 文件 | 描述 |
+|------|------|
+| `examples/basic.py` | 一行代码异步审查 |
+| `examples/basic_sync.py` | 同步用法 |
+| `examples/custom_rules.py` | 项目自定义 rules.toml |
+| `examples/custom_reporter.py` | 自定义 Slack reporter 插件 |
+| `examples/custom_auditor.py` | 自定义 SQL 注入 & 凭证 auditor |
+| `examples/ci_pipeline.py` | CI/CD 集成与退出码 |
 
-Run any example:
+运行示例：
 
 ```bash
 python examples/basic.py
 ```
 
-## Harness Architecture
+## Harness 架构
 
-CodeSentinel uses a three-level funnel with a plugin harness:
+CodeSentinel 采用三级漏斗 + 插件 harness 模式：
 
 ```
 PR URL
@@ -329,11 +329,11 @@ PR URL
   └─ ReviewResult (unified output)
 ```
 
-The harness pattern:
+Harness 模式：
 
-1. **AuditorPlugin.audit(context) → AuditResult** — each auditor gets an `AuditContext` with all PR data and returns an `AuditResult` with findings/warnings.
-2. **ReporterPlugin.render(result) → str** — each reporter converts a `ReviewResult` into a formatted string.
-3. **Pipeline orchestrator** runs auditors in order, collects results, then runs reporters. Partial failures are tolerated unless `strict=True`.
+1. **AuditorPlugin.audit(context) → AuditResult** — 每个 auditor 获取包含所有 PR 数据的 `AuditContext`，返回带有 findings/warnings 的 `AuditResult`。
+2. **ReporterPlugin.render(result) → str** — 每个 reporter 将 `ReviewResult` 转换为格式化字符串。
+3. **流水线编排器**按顺序运行 auditors，收集结果，然后运行 reporters。部分失败会被容忍，除非设置 `strict=True`。
 
 ## GitHub Action
 
@@ -358,7 +358,7 @@ jobs:
           MIMO_API_KEY: ${{ secrets.MIMO_API_KEY }}
 ```
 
-## Webhook Server
+## Webhook 服务
 
 ```bash
 # Start webhook server
@@ -368,33 +368,33 @@ codesentinel serve --port 8080
 # GitLab webhook: POST /webhook/gitlab
 ```
 
-## Configuration
+## 配置
 
-Environment variables (priority: `CODESENTINEL_` prefix > no prefix):
+环境变量（优先级：`CODESENTINEL_` 前缀 > 无前缀）：
 
-| Variable | Description |
-|----------|-------------|
+| 变量 | 说明 |
+|------|------|
 | `GITHUB_TOKEN` | GitHub API Token |
-| `MIMO_API_KEY` | MiMo LLM API Key (default) |
-| `DEEPSEEK_API_KEY` | DeepSeek API Key (alternative) |
-| `GITLAB_TOKEN` | GitLab API Token (optional) |
+| `MIMO_API_KEY` | MiMo LLM API Key（默认） |
+| `DEEPSEEK_API_KEY` | DeepSeek API Key（备选） |
+| `GITLAB_TOKEN` | GitLab API Token（可选） |
 
-## CLI Commands
+## CLI 命令
 
 ```
-codesentinel review <pr_url>     # Review a PR/MR (GitHub or GitLab)
+codesentinel review <pr_url>     # 审查 PR/MR（GitHub 或 GitLab）
 codesentinel serve               # Start webhook server
 codesentinel init                # Generate .codesentinel/ template
 codesentinel config show         # Show current config
 codesentinel config set <k> <v>  # Set config value
 ```
 
-Supported URL formats:
+支持的 URL 格式：
 - GitHub: `https://github.com/{owner}/{repo}/pull/{number}`
 - GitLab: `https://{host}/{project_path}/-/merge_requests/{number}`
-  - Supports nested namespaces: `group/subgroup/project`
+  - 支持嵌套命名空间：`group/subgroup/project`
 
-## Project Structure
+## 项目结构
 
 ```
 src/code_sentinel/

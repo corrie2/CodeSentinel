@@ -11,7 +11,6 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
-import re
 import urllib.parse
 from typing import Any, Optional
 
@@ -115,11 +114,18 @@ class GitLabProvider(BaseGitProvider):
     # ── Project ID resolution ────────────────────────────────────────
 
     def _encode_project_path(self, owner: str, repo: str) -> str:
-        """URL-encode the ``owner/repo`` path for use in API URLs."""
-        return urllib.parse.quote(f"{owner}/{repo}", safe="")
+        """URL-encode the project path for use in API URLs.
+
+        Supports nested namespaces (e.g. "group/subgroup/project").
+        """
+        path = f"{owner}/{repo}" if repo else owner
+        return urllib.parse.quote(path, safe="")
 
     async def _resolve_project_id(self, owner: str, repo: str) -> int:
         """Resolve the numeric project ID for *owner/repo*.
+
+        Supports nested namespaces: pass full path as owner with repo="",
+        or owner="group/subgroup" and repo="project".
 
         Results are cached so that repeated calls for the same project
         do not trigger additional API requests.
@@ -129,7 +135,8 @@ class GitLabProvider(BaseGitProvider):
         ProviderError
             If the project cannot be found.
         """
-        key = f"{owner}/{repo}"
+        path = f"{owner}/{repo}" if repo else owner
+        key = path
         if key in self._project_id_cache:
             return self._project_id_cache[key]
 
@@ -144,7 +151,7 @@ class GitLabProvider(BaseGitProvider):
         pid = data.get("id")
         if not pid:
             raise ProviderError(
-                f"Could not resolve project ID for {owner}/{repo}",
+                f"Could not resolve project ID for {path}",
                 status_code=404,
             )
         self._project_id_cache[key] = int(pid)
@@ -219,10 +226,7 @@ class GitLabProvider(BaseGitProvider):
             new_path = change.get("new_path", "")
             diff_text = change.get("diff", "")
 
-            if old_path == new_path:
-                header = f"--- {old_path}\n+++ {new_path}"
-            else:
-                header = f"--- {old_path}\n+++ {new_path}"
+            header = f"--- {old_path}\n+++ {new_path}"
             diff_parts.append(f"{header}\n{diff_text}")
 
         return "\n".join(diff_parts)

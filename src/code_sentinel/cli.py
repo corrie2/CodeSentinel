@@ -13,11 +13,10 @@ import asyncio
 import json
 import logging
 import os
-import re
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any
 
 from code_sentinel.reporter.formatter import (
     PRMetadata,
@@ -95,23 +94,6 @@ def _save_config(config: dict[str, str]) -> None:
     with open(_CONFIG_FILE, "w") as f:
         json.dump(config, f, indent=2, sort_keys=True)
     print(f"Config saved to {_CONFIG_FILE}")
-
-
-# ── PR URL Parsing ───────────────────────────────────────────────
-
-_PR_PATTERN = re.compile(
-    r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
-)
-
-
-def parse_pr_url(url: str) -> tuple[str, str, int]:
-    """Parse a GitHub PR URL into (owner, repo, pr_number)."""
-    match = _PR_PATTERN.match(url.strip())
-    if not match:
-        raise ValueError(
-            f"Invalid PR URL: {url}\nExpected format: https://github.com/owner/repo/pull/123"
-        )
-    return match.group("owner"), match.group("repo"), int(match.group("number"))
 
 
 # ── Pipeline ─────────────────────────────────────────────────────

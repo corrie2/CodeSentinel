@@ -36,10 +36,10 @@ def test_create_app_with_config():
 
 
 def test_run_github_audit_uses_config():
-    """_run_github_audit passes the provider from _app_state['config'] to
+    """_run_audit passes the provider from _app_state['config'] to
     ReviewOptions.
     """
-    from code_sentinel.server import create_app, _app_state, _run_github_audit
+    from code_sentinel.server import create_app, _app_state, _run_audit
 
     cfg = Config(provider="deepseek", github_token="gh_test_token")
     create_app(config=cfg)
@@ -57,7 +57,7 @@ def test_run_github_audit_uses_config():
 
     with patch("code_sentinel.server._app_state", _app_state), \
          patch("code_sentinel.review.review", side_effect=fake_review):
-        asyncio.run(_run_github_audit("owner", "repo", 42))
+        asyncio.run(_run_audit("github", "owner", "repo", 42))
 
     assert captured["options"].provider == "deepseek"
     assert captured["options"].github_token == "gh_test_token"

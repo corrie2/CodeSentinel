@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict
 from typing import Any
 
 from code_sentinel.plugins import ReporterPlugin

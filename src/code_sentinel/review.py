@@ -54,6 +54,15 @@ logger = logging.getLogger(__name__)
 # ── Public API ──────────────────────────────────────────────────
 
 
+# Regex for detecting sensitive words in project context files
+_SENSITIVE_WORDS_RE = re.compile(
+    r"\b(?:key|token|secret|password|credential)\b|"
+    r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|"
+    r"private[_-]?key|client[_-]?secret)",
+    re.IGNORECASE,
+)
+
+
 @dataclass
 class ReviewOptions:
     """Options for :func:`review`.
@@ -71,8 +80,8 @@ class ReviewOptions:
     skip_llm: bool = False
     timeout_seconds: int = 120
     strict: bool = False
-    auditors: list | None = None
-    reporters: list | None = None
+    auditors: list[str] | None = None
+    reporters: list[str] | None = None
     memory_db: str | None = None
 
 
@@ -125,8 +134,6 @@ def review_sync(
     Returns:
         A :class:`ReviewResult`.
     """
-    import asyncio
-
     return asyncio.run(review(pr_url, options))
 
 
@@ -147,8 +154,8 @@ class _MergedOptions:
     timeout_seconds: int = 120
     strict: bool = False
     memory_db: str = ""
-    auditors: list | None = None
-    reporters: list | None = None
+    auditors: list[str] | None = None
+    reporters: list[str] | None = None
 
 
 # ── Config helpers ──────────────────────────────────────────────
@@ -171,7 +178,7 @@ _PR_PATTERN = re.compile(
     r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
 )
 _GITLAB_MR_PATTERN = re.compile(
-    r"https?://(?P<host>[^/]+)/(?P<owner>[^/]+)/(?P<repo>[^/]+)/-/merge_requests/(?P<number>\d+)"
+    r"https?://(?P<host>[^/]+)/(?P<project_path>.+?)/-/merge_requests/(?P<number>\d+)"
 )
 
 
@@ -235,7 +242,8 @@ def _merge_options(opts: ReviewOptions, cfg: dict[str, str]) -> _MergedOptions:
 def _parse_pr_url(url: str) -> tuple[str, str, int, str]:
     """Parse a PR/MR URL into (owner, repo, pr_number, provider_type).
 
-    Supports GitHub PRs and GitLab MRs.
+    Supports GitHub PRs and GitLab MRs (including nested namespaces).
+    For GitLab, owner=full_project_path, repo="" (use _full_project_path() helper).
     """
     url = url.strip()
     match = _PR_PATTERN.match(url)
@@ -243,10 +251,19 @@ def _parse_pr_url(url: str) -> tuple[str, str, int, str]:
         return match.group("owner"), match.group("repo"), int(match.group("number")), "github"
     match = _GITLAB_MR_PATTERN.match(url)
     if match:
-        return match.group("owner"), match.group("repo"), int(match.group("number")), "gitlab"
+        # For GitLab, return full project path as owner (e.g. "group/subgroup/project")
+        project_path = match.group("project_path")
+        return project_path, "", int(match.group("number")), "gitlab"
     raise ValueError(
         f"Invalid PR URL: {url}\nExpected: https://github.com/owner/repo/pull/123 or https://gitlab.com/owner/repo/-/merge_requests/123"
     )
+
+
+def _full_project_path(owner: str, repo: str) -> str:
+    """Reconstruct the full project path for GitLab (handles nested namespaces)."""
+    if repo:
+        return f"{owner}/{repo}"
+    return owner
 
 
 
@@ -265,7 +282,8 @@ async def _collect_pr_data(
     if provider_type == "gitlab":
         from code_sentinel.git_provider.gitlab import GitLabProvider
         provider_cls = GitLabProvider
-        url_prefix = f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{pr_number}"
+        project_path = _full_project_path(owner, repo)
+        url_prefix = f"https://gitlab.com/{project_path}/-/merge_requests/{pr_number}"
     else:
         from code_sentinel.git_provider.github import GitHubProvider
         provider_cls = GitHubProvider
@@ -277,7 +295,7 @@ async def _collect_pr_data(
             "author": "",
             "url": url_prefix,
             "number": pr_number,
-            "repo": f"{owner}/{repo}",
+            "repo": f"{owner}/{repo}" if repo else owner,
             "base_sha": "",
             "head_sha": "",
         },
@@ -287,7 +305,11 @@ async def _collect_pr_data(
 
     try:
         async with provider_cls(config_obj) as provider:
-            pr_info = await provider.get_pr(owner, repo, pr_number)
+            # For GitLab, pass full project path; for GitHub, pass owner/repo separately
+            if provider_type == "gitlab":
+                pr_info = await provider.get_pr(project_path, "", pr_number)
+            else:
+                pr_info = await provider.get_pr(owner, repo, pr_number)
             result["pr"]["title"] = pr_info.title
             result["pr"]["author"] = pr_info.author
 
@@ -299,9 +321,12 @@ async def _collect_pr_data(
                 except Exception:
                     pass
 
-            result["diff"] = await provider.get_diff(owner, repo, pr_number)
-
-            files = await provider.get_files(owner, repo, pr_number)
+            if provider_type == "gitlab":
+                result["diff"] = await provider.get_diff(project_path, "", pr_number)
+                files = await provider.get_files(project_path, "", pr_number)
+            else:
+                result["diff"] = await provider.get_diff(owner, repo, pr_number)
+                files = await provider.get_files(owner, repo, pr_number)
             result["changed_files"] = [
                 {
                     "filename": f.filename,
@@ -313,7 +338,7 @@ async def _collect_pr_data(
             ]
 
     except Exception as exc:
-        logger.warning("GitHub API error: %s — continuing with partial data", exc)
+        logger.warning("Git provider API error: %s — continuing with partial data", exc)
 
     return result
 
@@ -371,7 +396,8 @@ async def _run_pipeline_internal(
         changed_files = pr_data.get("changed_files", [])
 
         if not raw_diff and not changed_files:
-            msg = "Could not fetch PR diff. Check your GITHUB_TOKEN."
+            token_hint = "GITLAB_TOKEN" if provider_type == "gitlab" else "GITHUB_TOKEN"
+            msg = f"Could not fetch PR diff. Check your {token_hint}."
             _record(trace, "PR Data", "failed", msg)
             if merged.strict:
                 raise RuntimeError(msg)
@@ -506,13 +532,6 @@ async def _run_pipeline_internal(
     )
 
     # ── Step 4: Project context (.codesentinel/) ─────────────────
-    _SENSITIVE_WORDS = re.compile(
-        r"\b(?:key|token|secret|password|credential)\b|"
-        r"(?:api[_-]?key|access[_-]?token|auth[_-]?token|"
-        r"private[_-]?key|client[_-]?secret)",
-        re.IGNORECASE,
-    )
-
     # If changeset is None, we can't verify .codesentinel/ is untouched — block fallback
     codesentinel_modified = True if changeset is None else any(
         f.path.startswith(".codesentinel/") for f in changeset.files
@@ -545,12 +564,12 @@ async def _run_pipeline_internal(
                             sanitized = "\n".join(
                                 line
                                 for line in raw.splitlines()
-                                if not _SENSITIVE_WORDS.search(line)
+                                if not _SENSITIVE_WORDS_RE.search(line)
                             )
                             project_context += f"\n\n## {ctx_file}\n\n{sanitized}"
                             _ctx_count += 1
-                    except Exception:
-                        pass
+                    except Exception as exc:
+                        logger.debug("Failed to fetch .codesentinel/%s from base branch: %s", ctx_file, exc)
 
         # Fallback: try local file (BLOCKED if PR modifies .codesentinel/)
         if not project_context and merged.repo_path and not codesentinel_modified:
@@ -563,7 +582,7 @@ async def _run_pipeline_internal(
                         sanitized = "\n".join(
                             line
                             for line in raw.splitlines()
-                            if not _SENSITIVE_WORDS.search(line)
+                            if not _SENSITIVE_WORDS_RE.search(line)
                         )
                         project_context += f"\n\n## {ctx_file}\n\n{sanitized}"
                         _ctx_count += 1
