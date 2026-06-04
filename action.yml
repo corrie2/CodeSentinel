@@ -7,6 +7,18 @@ inputs:
     description: "Pull request URL (auto-detected in GitHub Actions)"
     required: false
     default: ""
+  mimo_api_key:
+    description: "MiMo API key"
+    required: false
+    default: ""
+  deepseek_api_key:
+    description: "DeepSeek API key"
+    required: false
+    default: ""
+  github_token:
+    description: "GitHub token"
+    required: false
+    default: ${{ github.token }}
   format:
     description: "Output format: markdown or json"
     required: false
@@ -44,9 +56,9 @@ runs:
       id: audit
       shell: bash
       env:
-        GITHUB_TOKEN: ${{ github.token }}
-        MIMO_API_KEY: ${{ secrets.MIMO_API_KEY }}
-        DEEPSEEK_API_KEY: ${{ secrets.DEEPSEEK_API_KEY }}
+        GITHUB_TOKEN: ${{ inputs.github_token }}
+        MIMO_API_KEY: ${{ inputs.mimo_api_key }}
+        DEEPSEEK_API_KEY: ${{ inputs.deepseek_api_key }}
       run: |
         PR_URL="${{ inputs.pr_url }}"
         if [ -z "$PR_URL" ]; then

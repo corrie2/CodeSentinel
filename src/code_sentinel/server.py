@@ -317,9 +317,11 @@ async def _run_github_audit(owner: str, repo: str, number: int) -> None:
     try:
         from code_sentinel.review import review, ReviewOptions
 
+        cfg = _app_state.get("config")
         pr_url = f"https://github.com/{owner}/{repo}/pull/{number}"
         options = ReviewOptions(
-            provider=_app_state.get("provider", "mimo"),
+            provider=getattr(cfg, "provider", "mimo") if cfg else "mimo",
+            github_token=getattr(cfg, "github_token", None) if cfg else None,
             skip_llm=False,
         )
         result = await review(pr_url, options=options)
@@ -342,19 +344,23 @@ async def _run_gitlab_audit(owner: str, repo: str, number: int) -> None:
     This runs in a background asyncio task.
     """
     try:
-        from code_sentinel.git_provider.gitlab import GitLabProvider
+        from code_sentinel.review import review, ReviewOptions
 
-        async with GitLabProvider() as provider:
-            mr_info = await provider.get_pr(owner, repo, number)
-            files = await provider.get_files(owner, repo, number)
+        cfg = _app_state.get("config")
+        mr_url = f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{number}"
+        options = ReviewOptions(
+            provider=getattr(cfg, "provider", "mimo") if cfg else "mimo",
+            skip_llm=False,
+        )
+        result = await review(mr_url, options=options)
 
-            logger.info(
-                "GitLab audit complete for %s/%s#%d: %d files, state=%s",
-                owner, repo, number, len(files), mr_info.state,
-            )
+        logger.info(
+            "GitLab audit complete for %s/%s#%d: risk=%s score=%d findings=%d",
+            owner, repo, number, result.risk.level, result.risk.score,
+            len(result.llm_review.findings),
+        )
 
-            # TODO: Run the full pipeline (risk scoring, supply chain, LLM review)
-            # TODO: Post results back as an MR note
+        # TODO: Post results back as an MR note
 
     except Exception:
         logger.exception("Error in GitLab audit for %s/%s#%d", owner, repo, number)

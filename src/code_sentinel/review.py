@@ -170,6 +170,9 @@ _CONFIG_FILE = _CONFIG_DIR / "config.json"
 _PR_PATTERN = re.compile(
     r"https?://github\.com/(?P<owner>[^/]+)/(?P<repo>[^/]+)/pull/(?P<number>\d+)"
 )
+_GITLAB_MR_PATTERN = re.compile(
+    r"https?://(?P<host>[^/]+)/(?P<owner>[^/]+)/(?P<repo>[^/]+)/-/merge_requests/(?P<number>\d+)"
+)
 
 
 def _load_config() -> dict[str, str]:
@@ -229,14 +232,22 @@ def _merge_options(opts: ReviewOptions, cfg: dict[str, str]) -> _MergedOptions:
     )
 
 
-def _parse_pr_url(url: str) -> tuple[str, str, int]:
-    """Parse a GitHub PR URL into (owner, repo, pr_number)."""
-    match = _PR_PATTERN.match(url.strip())
-    if not match:
-        raise ValueError(
-            f"Invalid PR URL: {url}\nExpected format: https://github.com/owner/repo/pull/123"
-        )
-    return match.group("owner"), match.group("repo"), int(match.group("number"))
+def _parse_pr_url(url: str) -> tuple[str, str, int, str]:
+    """Parse a PR/MR URL into (owner, repo, pr_number, provider_type).
+
+    Supports GitHub PRs and GitLab MRs.
+    """
+    url = url.strip()
+    match = _PR_PATTERN.match(url)
+    if match:
+        return match.group("owner"), match.group("repo"), int(match.group("number")), "github"
+    match = _GITLAB_MR_PATTERN.match(url)
+    if match:
+        return match.group("owner"), match.group("repo"), int(match.group("number")), "gitlab"
+    raise ValueError(
+        f"Invalid PR URL: {url}\nExpected: https://github.com/owner/repo/pull/123 or https://gitlab.com/owner/repo/-/merge_requests/123"
+    )
+
 
 
 def _record(trace: PipelineTrace, name: str, status: str, message: str) -> None:
@@ -248,16 +259,23 @@ def _record(trace: PipelineTrace, name: str, status: str, message: str) -> None:
 
 
 async def _collect_pr_data(
-    owner: str, repo: str, pr_number: int, config_obj: Any
+    owner: str, repo: str, pr_number: int, config_obj: Any, provider_type: str = "github"
 ) -> dict[str, Any]:
-    """Collect PR data from GitHub using the GitHubProvider."""
-    from code_sentinel.git_provider.github import GitHubProvider
+    """Collect PR data from GitHub or GitLab."""
+    if provider_type == "gitlab":
+        from code_sentinel.git_provider.gitlab import GitLabProvider
+        provider_cls = GitLabProvider
+        url_prefix = f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{pr_number}"
+    else:
+        from code_sentinel.git_provider.github import GitHubProvider
+        provider_cls = GitHubProvider
+        url_prefix = f"https://github.com/{owner}/{repo}/pull/{pr_number}"
 
     result: dict[str, Any] = {
         "pr": {
             "title": f"PR #{pr_number}",
             "author": "",
-            "url": f"https://github.com/{owner}/{repo}/pull/{pr_number}",
+            "url": url_prefix,
             "number": pr_number,
             "repo": f"{owner}/{repo}",
             "base_sha": "",
@@ -268,22 +286,22 @@ async def _collect_pr_data(
     }
 
     try:
-        async with GitHubProvider(config_obj) as gh:
-            pr_info = await gh.get_pr(owner, repo, pr_number)
+        async with provider_cls(config_obj) as provider:
+            pr_info = await provider.get_pr(owner, repo, pr_number)
             result["pr"]["title"] = pr_info.title
             result["pr"]["author"] = pr_info.author
 
-            try:
-                raw_pr = await gh._get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
-                result["pr"]["base_sha"] = raw_pr.get("base", {}).get("sha", "")
-                result["pr"]["head_sha"] = raw_pr.get("head", {}).get("sha", "")
-            except Exception:
-                result["pr"]["base_sha"] = ""
-                result["pr"]["head_sha"] = ""
+            if provider_type == "github":
+                try:
+                    raw_pr = await provider._get(f"/repos/{owner}/{repo}/pulls/{pr_number}")
+                    result["pr"]["base_sha"] = raw_pr.get("base", {}).get("sha", "")
+                    result["pr"]["head_sha"] = raw_pr.get("head", {}).get("sha", "")
+                except Exception:
+                    pass
 
-            result["diff"] = await gh.get_diff(owner, repo, pr_number)
+            result["diff"] = await provider.get_diff(owner, repo, pr_number)
 
-            files = await gh.get_files(owner, repo, pr_number)
+            files = await provider.get_files(owner, repo, pr_number)
             result["changed_files"] = [
                 {
                     "filename": f.filename,
@@ -331,7 +349,7 @@ async def _run_pipeline_internal(
 
     # Parse PR URL
     try:
-        owner, repo, pr_number = _parse_pr_url(pr_url)
+        owner, repo, pr_number, provider_type = _parse_pr_url(pr_url)
     except ValueError as exc:
         if merged.strict:
             raise RuntimeError(str(exc)) from exc
@@ -340,7 +358,7 @@ async def _run_pipeline_internal(
         return result
 
     result.pr_url = pr_url
-    logger.info("Reviewing %s/%s#%s ...", owner, repo, pr_number)
+    logger.info("Reviewing %s/%s#%s [%s] ...", owner, repo, pr_number, provider_type)
 
     # ── Step 1: Collect PR data ──────────────────────────────────
     pr_data: dict[str, Any] = {}
@@ -348,7 +366,7 @@ async def _run_pipeline_internal(
     changed_files: list[dict] = []
 
     try:
-        pr_data = await _collect_pr_data(owner, repo, pr_number, config_obj)
+        pr_data = await _collect_pr_data(owner, repo, pr_number, config_obj, provider_type)
         raw_diff = pr_data.get("diff", "")
         changed_files = pr_data.get("changed_files", [])
 
@@ -535,8 +553,8 @@ async def _run_pipeline_internal(
                     except Exception:
                         pass
 
-        # Fallback: try local file
-        if not project_context and merged.repo_path:
+        # Fallback: try local file (BLOCKED if PR modifies .codesentinel/)
+        if not project_context and merged.repo_path and not codesentinel_modified:
             repo_root = Path(merged.repo_path).resolve()
             for ctx_file in ("project_profile.md", "review_policy.md"):
                 ctx_path = repo_root / ".codesentinel" / ctx_file
@@ -639,7 +657,7 @@ async def _run_pipeline_internal(
                 except Exception:
                     pass
 
-            if not _rules_loaded and merged.repo_path:
+            if not _rules_loaded and merged.repo_path and not codesentinel_modified:
                 local_rules = (
                     Path(merged.repo_path).resolve() / ".codesentinel" / "rules.toml"
                 )
