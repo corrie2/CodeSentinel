@@ -378,7 +378,7 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
                     risk_score=result.risk.score,
                     risk_level=result.risk.level,
                     risk_details=result.risk.contributions,
-                    needs_attention=result.needs_attention,
+                    needs_attention=result.attention,
                 )
                 comment_body = render_pr_comment(ctx)
             except Exception as exc:
