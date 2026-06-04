@@ -16,6 +16,7 @@ from typing import Any, Optional
 
 import httpx
 
+from code_sentinel.config import Config
 from code_sentinel.git_provider.base import (
     BaseGitProvider,
     FileInfo,
@@ -66,12 +67,18 @@ class GitLabProvider(BaseGitProvider):
 
     def __init__(
         self,
-        token: Optional[str] = None,
+        config: Config | str | None = None,
         base_url: str = _API,
         timeout: float = 30.0,
         max_retries: int = 3,
     ) -> None:
-        self._token = token or os.environ.get("GITLAB_TOKEN", "")
+        # Accept Config object, raw token string, or None
+        if isinstance(config, str):
+            self._token = config
+        elif config is not None and hasattr(config, "gitlab_token"):
+            self._token = config.gitlab_token or os.environ.get("GITLAB_TOKEN", "")
+        else:
+            self._token = os.environ.get("GITLAB_TOKEN", "")
         self._base_url = base_url.rstrip("/")
         self._timeout = timeout
         self._max_retries = max_retries
