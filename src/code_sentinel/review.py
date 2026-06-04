@@ -513,11 +513,10 @@ async def _run_pipeline_internal(
         re.IGNORECASE,
     )
 
-    codesentinel_modified = False
-    if changeset:
-        codesentinel_modified = any(
-            f.path.startswith(".codesentinel/") for f in changeset.files
-        )
+    # If changeset is None, we can't verify .codesentinel/ is untouched — block fallback
+    codesentinel_modified = True if changeset is None else any(
+        f.path.startswith(".codesentinel/") for f in changeset.files
+    )
 
     if codesentinel_modified:
         _record(

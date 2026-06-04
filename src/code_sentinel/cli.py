@@ -762,7 +762,7 @@ def cmd_serve(args) -> int:
 
     from code_sentinel.server import create_app
 
-    app = create_app()
+    app = create_app(webhook_secret=getattr(args, "webhook_secret", None))
     print(f"Starting CodeSentinel webhook server on {args.host}:{args.port}")
     uvicorn.run(app, host=args.host, port=args.port, log_level="info")
     return 0

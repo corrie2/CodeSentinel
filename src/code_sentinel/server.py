@@ -350,6 +350,7 @@ async def _run_gitlab_audit(owner: str, repo: str, number: int) -> None:
         mr_url = f"https://gitlab.com/{owner}/{repo}/-/merge_requests/{number}"
         options = ReviewOptions(
             provider=getattr(cfg, "provider", "mimo") if cfg else "mimo",
+            github_token=getattr(cfg, "github_token", None) if cfg else None,
             skip_llm=False,
         )
         result = await review(mr_url, options=options)
