@@ -157,6 +157,7 @@ class ReviewMetadata:
     provider: str = ""
     model: str = ""
     codesentinel_modified: bool = False
+    project_context_loaded: bool = False
     project_rules_loaded: bool = False
 
 

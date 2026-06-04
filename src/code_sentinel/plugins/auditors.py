@@ -221,6 +221,7 @@ class DeepReviewAuditor(AuditorPlugin):
                 provider=llm_config.get("provider", "mimo"),
                 api_key=llm_config.get("api_key"),
                 github_token=context.github_token,
+                gitlab_token=context.gitlab_token,
             )
 
             # Build a minimal RiskScore

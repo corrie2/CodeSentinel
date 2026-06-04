@@ -75,6 +75,7 @@ class ReviewOptions:
     model: str | None = None
     api_key: str | None = None
     github_token: str | None = None
+    gitlab_token: str | None = None
     rules_path: str | None = None
     repo_path: str | None = None
     skip_llm: bool = False
@@ -148,6 +149,7 @@ class _MergedOptions:
     model: str = ""
     api_key: str = ""
     github_token: str = ""
+    gitlab_token: str = ""
     rules_path: str = ""
     repo_path: str = ""
     skip_llm: bool = False
@@ -163,6 +165,7 @@ class _MergedOptions:
 _ENV_PREFIX = "CODESENTINEL_"
 _DEFAULT_CONFIG = {
     "github_token": "",
+    "gitlab_token": "",
     "mimo_api_key": "",
     "default_format": "markdown",
     "skip_llm": "false",
@@ -214,6 +217,7 @@ def _merge_options(opts: ReviewOptions, cfg: dict[str, str]) -> _MergedOptions:
         api_key = cfg.get(f"{provider}_api_key") or cfg.get("api_key") or ""
 
     github_token = opts.github_token or cfg.get("github_token") or ""
+    gitlab_token = opts.gitlab_token or cfg.get("gitlab_token") or ""
 
     skip_llm = opts.skip_llm
     if not skip_llm:
@@ -228,6 +232,7 @@ def _merge_options(opts: ReviewOptions, cfg: dict[str, str]) -> _MergedOptions:
         model=opts.model or "",
         api_key=api_key,
         github_token=github_token,
+        gitlab_token=gitlab_token,
         rules_path=rules_path,
         repo_path=repo_path,
         skip_llm=skip_llm,
@@ -387,6 +392,7 @@ async def _run_pipeline_internal(
         provider=merged.provider,
         api_key=merged.api_key or None,
         github_token=merged.github_token or None,
+        gitlab_token=merged.gitlab_token or None,
     )
 
     # Parse PR URL
@@ -566,7 +572,7 @@ async def _run_pipeline_internal(
     project_context = ""
     _ctx_count = 0
     base_sha = pr_data.get("pr", {}).get("base_sha", "")
-    project_rules_loaded = False
+    project_context_loaded = False
 
     try:
         if base_sha and owner and repo:
@@ -613,7 +619,7 @@ async def _run_pipeline_internal(
             if "review_policy.md" in project_context:
                 file_names.append("review_policy.md")
             status = "ok" if len(file_names) == 2 else "partial"
-            project_rules_loaded = len(file_names) > 0
+            project_context_loaded = len(file_names) > 0
             _record(trace, "Project Context", status, f"Loaded {' + '.join(file_names)}")
         elif not codesentinel_modified:
             _record(trace, "Project Context", "skipped", "No .codesentinel/ directory")
@@ -660,6 +666,7 @@ async def _run_pipeline_internal(
     # ── Step 7: Risk scoring ─────────────────────────────────────
     risk_score = None
     loaded_ruleset = None
+    project_rules_loaded = bool(merged.rules_path)  # True if explicitly provided
 
     try:
         from code_sentinel.risk.scorer import load_rules
@@ -729,7 +736,8 @@ async def _run_pipeline_internal(
             score=risk_score.score,
             contributions=contributions,
         )
-        result.metadata.project_rules_loaded = project_rules_loaded
+        result.metadata.project_context_loaded = project_context_loaded
+        result.metadata.project_rules_loaded = project_rules_loaded or _rules_loaded
 
         _record(
             trace, "Risk Scoring", "ok",
@@ -765,6 +773,7 @@ async def _run_pipeline_internal(
         project_context=project_context,
         dep_changes=dep_changes,
         github_token=merged.github_token,
+        gitlab_token=merged.gitlab_token,
         llm_config={"provider": merged.provider, "api_key": merged.api_key},
         risk_summary=result.risk,
         options=merged,

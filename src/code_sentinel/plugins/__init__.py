@@ -35,6 +35,7 @@ class AuditContext:
     project_context: str | None = None
     dep_changes: list = field(default_factory=list)
     github_token: str | None = None
+    gitlab_token: str | None = None
     llm_config: dict | None = None
     risk_summary: Any = None  # RiskSummary (risk level + score)
     options: Any = None  # ReviewOptions

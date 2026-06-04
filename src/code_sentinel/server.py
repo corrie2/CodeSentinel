@@ -359,7 +359,7 @@ async def _run_audit(provider_type: str, owner: str, repo: str, number: int) -> 
         )
 
         # Post results back as a PR/MR comment
-        comment_body = result.reports.get("pr_comment", "")
+        comment_body = result.reports.get("pr-comment", "")
         if not comment_body:
             # Fallback: generate from result if reporter didn't run
             try:
